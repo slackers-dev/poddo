@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -95,12 +96,22 @@ def cmd_run(a) -> int:
     cfg, api, project = _ctx()
     runner = Runner(Pods(api, cfg, project), project)
     down = True if a.down else (False if a.keep else None)
-    return runner.run(a.task, a.args, a.gpu, down, a.wait)
+    return runner.run(a.task, a.args, a.gpu, down, a.wait, detach=a.detach)
 
 
 def cmd_attach(a) -> int:
     cfg, api, project = _ctx()
     return Runner(Pods(api, cfg, project), project).attach(a.job)
+
+
+def cmd_jobs(a) -> int:
+    cfg, api, project = _ctx()
+    return Runner(Pods(api, cfg, project), project).jobs(watch=a.watch, limit=a.n)
+
+
+def cmd_logs(a) -> int:
+    cfg, api, project = _ctx()
+    return Runner(Pods(api, cfg, project), project).logs(a.job, follow=a.follow, lines=a.n)
 
 
 def cmd_ssh(a) -> int:
@@ -128,6 +139,16 @@ def cmd_status(a) -> int:
         print(f"{p['id']:16} {status:12} {name:36} {gpu:32} ${cost:.2f}/h")
     if others:
         print(f"({others} weitere Pods, nicht von pod-do)")
+    try:
+        here = Project.find()
+    except ConfigError:
+        here = None
+    if here:
+        open_jobs = Runner(Pods(api, cfg, here), here).unfetched()
+        for st in open_jobs:
+            print(f"Ergebnisse NICHT abgeholt: {st['job']}  ->  pod-do attach {st['job']}")
+        if open_jobs:
+            print("(Details mit Fortschritt: pod-do jobs)")
     vol = Pods(api, cfg, project or Project(Path.cwd(), "-", {}, {})).volume_id() if cfg.volume else None
     print(
         f"Global Volume {cfg.volume!r}: {vol or 'fehlt (pod-do volume --create)'}"
@@ -193,7 +214,7 @@ def _set_config(key: str, value: str) -> None:
     f.parent.mkdir(parents=True, exist_ok=True)
     lines = f.read_text().splitlines() if f.exists() else []
     lines = [ln for ln in lines if not ln.split("=")[0].strip() == key]
-    lines.append(f'{key} = "{value}"')
+    lines.append(f"{key} = {json.dumps(value)}")  # JSON-String ist auch ein gueltiger TOML-String
     f.write_text("\n".join(lines) + "\n")
 
 
@@ -264,6 +285,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument(
         "--wait", type=float, metavar="MIN", help="so lange auf eine freie GPU warten (Standard 10)"
     )
+    s.add_argument(
+        "--detach",
+        action="store_true",
+        help="nur starten, nicht warten (Ergebnisse spaeter mit pod-do attach holen)",
+    )
     g = s.add_mutually_exclusive_group()
     g.add_argument("--down", action="store_true", help="Pod danach sofort loeschen")
     g.add_argument("--keep", action="store_true", help="Pod danach laufen lassen (Standard)")
@@ -272,6 +298,17 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("attach", help="wieder an einen laufenden Job haengen und Ergebnis holen")
     s.add_argument("job", nargs="?", help="Standard: der letzte")
     s.set_defaults(fn=cmd_attach)
+
+    s = sub.add_parser("jobs", help="letzte Jobs: laeuft (mit Fortschritt), fertig, abgeholt?")
+    s.add_argument("-w", "--watch", action="store_true", help="alle 5 s neu anzeigen")
+    s.add_argument("-n", type=int, default=10, help="so viele Jobs (Standard 10)")
+    s.set_defaults(fn=cmd_jobs)
+
+    s = sub.add_parser("logs", help="Log eines Jobs (Standard: der letzte)")
+    s.add_argument("job", nargs="?")
+    s.add_argument("-f", "--follow", action="store_true", help="weiter mitlesen, bis der Job fertig ist")
+    s.add_argument("-n", type=int, default=40, help="so viele Zeilen (Standard 40)")
+    s.set_defaults(fn=cmd_logs)
 
     s = sub.add_parser("ssh", help="Shell auf dem Pod")
     s.add_argument("env", nargs="?")

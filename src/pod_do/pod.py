@@ -13,9 +13,10 @@ from . import pod_scripts as S
 from . import registry
 from .api import ApiError, RunPod, ssh_of
 from .config import ConfigError, EnvSpec, GlobalConfig, Project
-from .remote import Remote
+from .remote import Remote, RemoteError
 
 VOLUME_PATH = "/vol"
+RESULTS_PATH = f"{VOLUME_PATH}/pod-do/results"
 ALIVE = ("PROVISIONING", "STARTING", "RUNNING")
 
 
@@ -25,6 +26,12 @@ def say(msg: str) -> None:
 
 def pod_name(project: str, env: str) -> str:
     return re.sub(r"[^a-zA-Z0-9-]+", "-", f"pod-do-{project}-{env}").strip("-").lower()
+
+
+def results_archive(project: str, job: str) -> str:
+    """Wo die Ergebnisse eines Jobs auf dem Volume liegen."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", project).strip("-") or "projekt"
+    return f"{RESULTS_PATH}/{safe}/{job}.tar.zst"
 
 
 def image_ref(env: EnvSpec) -> str | None:
@@ -202,11 +209,11 @@ class Pods:
             raise ConfigError(f"Pod {pod['id']} hat (noch) keine SSH-Verbindung")
         return Remote(ssh, self.cfg.ssh_key)
 
-    def prepare(self, r: Remote, env: EnvSpec) -> None:
-        """Skripte hinkopieren, Waechter starten, Umgebung herstellen (Archiv oder setup)."""
+    def install(self, r: Remote, env: EnvSpec) -> None:
+        """Skripte hinkopieren und den Waechter starten, alles in einem SSH-Aufruf."""
         vol = VOLUME_PATH if self.cfg.volume else ""
         exports = "\n".join(f"export {k}={shlex.quote(v)}" for k, v in env.vars.items())
-        files = {
+        texts = {
             f"{S.ROOT}/env.sh": S.ENV_SH.replace("@ENV@", env.name)
             .replace("@VOLUME@", vol)
             .replace("@VARS@", exports),
@@ -216,40 +223,69 @@ class Pods:
             f"{S.ROOT}/start.sh": S.START_SH,
             f"{S.ROOT}/follow.sh": S.FOLLOW_SH,
             f"{S.ROOT}/watchdog.sh": S.WATCHDOG_SH,
+            f"{S.ROOT}/status.sh": S.STATUS_SH,
+            f"{S.ROOT}/save.sh": S.SAVE_SH,
+            f"{S.ROOT}/bin/pod-do-progress": S.PROGRESS_SH,
             f"{S.ROOT}/setup.sh": env.setup,
             f"{S.ROOT}/boot.sh": env.boot,
         }
-        # alles in einem Rutsch: ein tar ueber eine Verbindung waere schneller, so ist es einfacher
-        for path, text in files.items():
-            r.put_text(text, path, "755")
         idle = env.idle_minutes if env.idle_minutes is not None else self.cfg.idle_minutes
         max_h = env.max_hours if env.max_hours is not None else self.cfg.max_hours
-        r.run(S.START_WATCHDOG.replace("@IDLE@", str(int(idle))).replace("@MAX@", str(max_h)))
-        say(f"Waechter laeuft: loescht den Pod nach {idle} min Leerlauf, spaetestens nach {max_h} h")
-        code = self.run_job(r, "_bootstrap", f"bash {S.ROOT}/bootstrap.sh")
-        if code != 0:
-            raise ConfigError(
-                f"Einrichten fehlgeschlagen (Code {code}). Log: pod-do ssh, dann "
-                f"cat {S.ROOT}/jobs/_bootstrap/log"
-            )
+        keep = max(int(self.cfg.keep_results_minutes), int(idle))
+        watchdog = (
+            S.START_WATCHDOG.replace("@IDLE@", str(int(idle)))
+            .replace("@MAX@", str(max_h))
+            .replace("@KEEP@", str(keep))
+        )
+        r.put_files({path: (text, 0o755) for path, text in texts.items()}, then=watchdog)
+        say(
+            f"Waechter laeuft: loescht den Pod nach {idle} min Leerlauf ({keep} min, solange Ergebnisse "
+            f"nicht abgeholt sind), spaetestens nach {max_h} h"
+        )
+
+    def start_job(
+        self,
+        r: Remote,
+        job: str,
+        script: str,
+        header: str = "",
+        save: list[str] | None = None,
+    ) -> None:
+        """Startet `script` losgeloest vom SSH.
+        save: Pfade im Job-Ordner, die am Ende aufs Volume gesichert werden (nur mit Volume)."""
+        d = f"{S.ROOT}/jobs/{job}"
+        body = f"set -eo pipefail\nsource {S.ROOT}/env.sh\n{header}\ncd {shlex.quote(d)}\n{script}\n"
+        files = {f"{d}/run.sh": (body, 0o644)}
+        if save is not None and self.cfg.volume:
+            dest = results_archive(self.project.name, job)
+            days = int(self.cfg.keep_results_days)
+            files[f"{d}/save.conf"] = (f"DEST={shlex.quote(dest)}\nDAYS={days}\n", 0o644)
+            files[f"{d}/save.list"] = ("".join(f"{p}\n" for p in save), 0o644)
+        r.put_files(files, then=f"bash {S.ROOT}/start.sh {shlex.quote(d)}")
 
     def run_job(self, r: Remote, job: str, script: str, header: str = "") -> int:
         """Startet `script` losgeloest vom SSH und zeigt das Log. Gibt den Exit-Code zurueck."""
-        d = f"{S.ROOT}/jobs/{job}"
-        r.put_text(
-            f"set -eo pipefail\nsource {S.ROOT}/env.sh\n{header}\ncd {shlex.quote(d)}\n{script}\n",
-            f"{d}/run.sh",
-        )
-        r.run(f"bash {S.ROOT}/start.sh {shlex.quote(d)}")
+        self.start_job(r, job, script, header)
         return self.follow(r, job)
 
     def follow(self, r: Remote, job: str) -> int:
         d = f"{S.ROOT}/jobs/{job}"
         try:
-            return r.run(f"bash {S.ROOT}/follow.sh {shlex.quote(d)}", check=False).returncode
+            code = r.run(f"bash {S.ROOT}/follow.sh {shlex.quote(d)}", check=False).returncode
         except KeyboardInterrupt:
             say(f"Abgekoppelt. Der Job {job} laeuft auf dem Pod weiter: pod-do attach {job}")
             raise
+        if code == 255:
+            # 255 kommt von ssh selbst (Verbindung weg, Laptop schlief), ausser der Job endete wirklich so
+            try:
+                real = r.run(f"cat {shlex.quote(d)}/exitcode", capture=True).stdout.strip()
+            except Exception:
+                real = ""
+            if real != "255":
+                raise RemoteError(
+                    f"Verbindung zum Pod verloren. Der Job {job} laeuft weiter: pod-do attach {job}"
+                )
+        return code
 
     # -- Alles zusammen ---------------------------------------------------------------------------
 
@@ -271,9 +307,11 @@ class Pods:
                 say(f"Docker-Image uebersprungen: {e}")
                 target, exists = None, False
         pod = self.find(env_name)
+        created = False
         if pod:
             say(f"nehme laufenden Pod {pod['id']} ({pod.get('gpu', {}).get('id', '?')})")
         else:
+            created = True
             wait = self.cfg.wait_minutes if wait_minutes is None else wait_minutes
             image, cred = None, None
             if target and exists:
@@ -282,8 +320,25 @@ class Pods:
             elif target:
                 say(f"Image {target} gibt es noch nicht: einrichten wie gewohnt, danach hochladen")
             pod = self.create(env, gpu_override, wait, image=image, registry_id=cred)
-        r = self.wait_ssh(pod)
-        self.prepare(r, env)
+        try:
+            r = self.wait_ssh(pod)
+            self.install(r, env)
+        except BaseException:
+            # Ohne Waechter loescht sich ein Pod nie selbst. Haben wir ihn eben angelegt und kommen nicht
+            # bis zum Waechter (kein SSH, Ctrl-C, Fehler), sofort wieder loeschen statt ihn laufen zu lassen.
+            if created:
+                say(f"Pod {pod['id']} wird wieder geloescht (kam nicht bis zum Waechter)")
+                try:
+                    self.api.terminate_pod(pod["id"])
+                except Exception as e:
+                    say(f"Loeschen ging nicht ({e}). Bitte von Hand: pod-do down")
+            raise
+        code = self.run_job(r, "_bootstrap", f"bash {S.ROOT}/bootstrap.sh")
+        if code != 0:
+            raise ConfigError(
+                f"Einrichten fehlgeschlagen (Code {code}). Log: pod-do ssh, dann "
+                f"cat {S.ROOT}/jobs/_bootstrap/log"
+            )
         if target and push and not self.has_image_marker(r, env, target):
             self.push_image(r, env, target)
         return pod, r
@@ -334,6 +389,13 @@ class Pods:
         user = shlex.quote(self.cfg.registry_user)
         login = f"crane auth login {shlex.quote(ref.host)} -u {user} --password-stdin"
         r.run(f"source {S.ROOT}/env.sh && {login}", stdin_text=secret)
+        try:
+            self._push(r, env, target)
+        finally:
+            # Zugang nicht auf dem Pod liegen lassen (~/.docker/config.json)
+            r.run(f"source {S.ROOT}/env.sh && crane auth logout {shlex.quote(ref.host)}", check=False)
+
+    def _push(self, r: Remote, env: EnvSpec, target: str) -> None:
         script = (
             S.PUSH_SH.replace("@ENV@", env.name)
             .replace("@BASE@", shlex.quote(env.image))
@@ -344,6 +406,21 @@ class Pods:
         if code != 0:
             raise ConfigError(f"Image hochladen fehlgeschlagen (Code {code})")
         say(f"Image bereit: {target}. Neue Pods starten ab jetzt direkt daraus.")
+
+    def alive(self) -> list[dict]:
+        return [p for p in self.mine() if p.get("status") in ALIVE]
+
+    def temporary(self, env: EnvSpec) -> tuple[dict, Remote]:
+        """Kurzer Pod nur fuer Dateien auf dem Volume, ohne die Umgebung. Der Aufrufer loescht ihn."""
+        pod = self.create(env, wait_minutes=self.cfg.wait_minutes)
+        try:
+            r = self.wait_ssh(pod)
+            self.install(r, env)
+        except BaseException:
+            say(f"Pod {pod['id']} wird wieder geloescht")
+            self.api.terminate_pod(pod["id"])
+            raise
+        return pod, r
 
     def down(self, pod: dict) -> None:
         self.api.terminate_pod(pod["id"])

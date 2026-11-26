@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -31,8 +32,22 @@ class ConfigError(Exception):
     pass
 
 
+# Namen von Umgebungen und Aufgaben landen in Pfaden und Shell-Skripten auf dem Pod
+SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}")
+
+
+def _check_name(path: Path, kind: str, name: str) -> None:
+    if not SAFE_NAME.fullmatch(name):
+        raise ConfigError(f"{path}: {kind}.{name!r}: nur Buchstaben, Ziffern, _ . - erlaubt")
+
+
 def config_dir() -> Path:
     base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "pod-do"
+
+
+def state_dir() -> Path:
+    base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
     return Path(base) / "pod-do"
 
 
@@ -47,6 +62,10 @@ class GlobalConfig:
     registry_user: str = ""  # Benutzer fuer die Registry der Images (z. B. GitHub-Name bei ghcr.io)
     runpod_registry: str = "pod-do"  # Name der Registry-Zugangsdaten bei RunPod (zum Ziehen privater Images)
     max_hours: float = 6.0
+    # Fertiger Job, Ergebnisse noch nicht abgeholt: so lange wartet der Waechter, bevor er den Pod loescht
+    keep_results_minutes: int = 60
+    # Ergebnisse auf dem Global Volume, die nie abgeholt wurden: nach so vielen Tagen loeschen (0 = nie)
+    keep_results_days: int = 30
 
     @classmethod
     def load(cls, path: Path | None = None) -> GlobalConfig:
@@ -66,6 +85,8 @@ class GlobalConfig:
             "max_hours",
             "registry_user",
             "runpod_registry",
+            "keep_results_minutes",
+            "keep_results_days",
         ):
             if k in data:
                 setattr(cfg, k, data[k])
@@ -218,6 +239,7 @@ class Project:
         name = str(data.get("project") or root.name)
         envs = {}
         for n, e in (data.get("env") or {}).items():
+            _check_name(path, "env", n)
             if "image" not in e:
                 raise ConfigError(f"{path}: env.{n} braucht image")
             envs[n] = EnvSpec(
@@ -237,6 +259,7 @@ class Project:
             )
         tasks = {}
         for n, t in (data.get("task") or {}).items():
+            _check_name(path, "task", n)
             env = t.get("env") or (next(iter(envs)) if len(envs) == 1 else None)
             if env not in envs:
                 raise ConfigError(f"{path}: task.{n} braucht env (eines von {', '.join(envs) or '-'})")

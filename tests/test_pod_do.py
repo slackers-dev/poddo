@@ -222,7 +222,8 @@ def test_cli_help_and_init(tmp_path, monkeypatch, capsys):
 def test_pod_scripts_are_valid_bash():
     from pod_do import pod_scripts as S
 
-    for name in ("BOOTSTRAP_SH", "START_SH", "FOLLOW_SH", "WATCHDOG_SH", "START_WATCHDOG", "ENV_SH"):
+    names = ("BOOTSTRAP_SH", "START_SH", "FOLLOW_SH", "WATCHDOG_SH", "START_WATCHDOG", "ENV_SH")
+    for name in names + ("STATUS_SH", "PROGRESS_SH", "PUSH_SH", "SAVE_SH", "RESTORE_RESULTS_SH"):
         r = subprocess.run(["bash", "-n"], input=getattr(S, name), text=True, capture_output=True)
         assert r.returncode == 0, f"{name}: {r.stderr}"
 
@@ -336,3 +337,187 @@ def test_create_with_image_and_registry(tmp_path):
     )
     body = [c[2] for c in fake.calls if c[0] == "POST"][0]
     assert body["image"] == target and body["registry"] == "reg1"
+
+
+def test_post_not_retried_on_server_error(monkeypatch):
+    import pod_do.api as apimod
+
+    monkeypatch.setattr(apimod.time, "sleep", lambda s: None)
+    fake = FakeApi(
+        {
+            ("POST", "/v2/pods"): [(500, {"title": "Internal", "status": 500, "detail": "oops"})],
+            ("GET", "/v2/pods/x"): [(502, {}), (200, {"id": "x"})],
+        }
+    )
+    api = RunPod("k", transport=fake)
+    with pytest.raises(ApiError) as e:
+        api.create_pod({"name": "n"})
+    assert e.value.status == 500
+    assert sum(1 for c in fake.calls if c[0] == "POST") == 1  # sonst evtl. zwei Pods
+    assert api.get_pod("x")["id"] == "x"  # GET darf man wiederholen
+
+
+def test_network_error_becomes_api_error(monkeypatch):
+    import pod_do.api as apimod
+
+    monkeypatch.setattr(apimod.time, "sleep", lambda s: None)
+    calls = []
+
+    def down(method, url, headers, body):
+        calls.append(method)
+        return 0, b'{"title": "Netzwerk", "detail": "timed out"}'
+
+    api = RunPod("k", transport=down)
+    with pytest.raises(ApiError, match="timed out"):
+        api.balance()
+    assert len(calls) == 5
+    calls.clear()
+    with pytest.raises(ApiError):
+        api.create_pod({})
+    assert len(calls) == 1
+
+
+def test_ensure_deletes_fresh_pod_without_watchdog(tmp_path, monkeypatch):
+    key = tmp_path / "k"
+    key.write_text("")
+    (tmp_path / "k.pub").write_text("ssh-ed25519 A")
+    fake = FakeApi(
+        {
+            ("GET", "/v2/pods"): [(200, {"pods": [], "pagination": {}})],
+            ("GET", "/v2/catalog/gpus"): [(200, GPUS)],
+            ("GET", "/v2/global-volumes"): [(200, {"globalVolumes": [], "pagination": {}})],
+            ("POST", "/v2/pods"): [(201, {"id": "p9", "name": "x", "status": "PROVISIONING"})],
+            ("DELETE", "/v2/pods/p9"): [(204, {})],
+        }
+    )
+    p = project(tmp_path)
+    pods = Pods(RunPod("k", transport=fake), GlobalConfig(ssh_key=key, gpus=["NVIDIA A40"]), p)
+
+    def no_ssh(pod, timeout=900):
+        raise ConfigError("kein SSH")
+
+    monkeypatch.setattr(pods, "wait_ssh", no_ssh)
+    with pytest.raises(ConfigError, match="kein SSH"):
+        pods.ensure("main")
+    assert ("DELETE", "/v2/pods/p9") in [(c[0], c[1]) for c in fake.calls]
+
+
+def test_ensure_keeps_existing_pod_on_error(tmp_path, monkeypatch):
+    running = {"id": "old", "name": "", "status": "RUNNING"}
+    p = project(tmp_path)
+    running["name"] = pod_name(p.name, "main")
+    fake = FakeApi({("GET", "/v2/pods"): [(200, {"pods": [running], "pagination": {}})]})
+    pods = Pods(RunPod("k", transport=fake), GlobalConfig(ssh_key=None), p)
+    monkeypatch.setattr(pods, "wait_ssh", lambda pod: (_ for _ in ()).throw(KeyboardInterrupt()))
+    with pytest.raises(KeyboardInterrupt):
+        pods.ensure("main")
+    assert not any(c[0] == "DELETE" for c in fake.calls)  # fremder/laufender Pod bleibt
+
+
+def test_unsafe_names_rejected(tmp_path):
+    with pytest.raises(ConfigError, match="erlaubt"):
+        project(tmp_path, "[env.'a b']\nimage='i'\n")
+    with pytest.raises(ConfigError, match="erlaubt"):
+        project(tmp_path, "[env.x]\nimage='i'\n[task.'$(rm)']\nrun='echo'\n")
+
+
+def test_put_files_sends_one_tar(monkeypatch, tmp_path):
+    import io
+    import tarfile
+
+    from pod_do import remote as remmod
+    from pod_do.api import Ssh
+
+    sent = []
+
+    def fake_run(cmd, input=None, **kw):
+        sent.append((cmd, input))
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(remmod.subprocess, "run", fake_run)
+    # zu langer Pfad fuer einen Unix-Socket: dann ohne gemeinsame Verbindung
+    assert remmod.Remote(Ssh("h", 22, "root", "pod1"), None, state=Path("/x" * 60))._mux is None
+    tmp_path = Path("/tmp/pd-test")
+    r = remmod.Remote(Ssh("h", 22, "root", "pod1"), None, state=tmp_path)
+    r._master_tried = True  # ohne Hintergrundverbindung
+    r.put_files({"/opt/pod-do/a.sh": ("echo a\n", 0o755), "/opt/pod-do/b": ("b", 0o644)}, then="echo ok")
+    assert len(sent) == 1
+    cmd, data = sent[0]
+    assert "HostKeyAlias=pod-do-pod1" in cmd and f"ControlPath={tmp_path}/ssh/pod1" in cmd
+    assert cmd[-1].endswith("&& echo ok'")
+    with tarfile.open(fileobj=io.BytesIO(data)) as t:
+        m = {i.name: i for i in t.getmembers()}
+        assert m["opt/pod-do/a.sh"].mode == 0o755
+        assert t.extractfile("opt/pod-do/b").read() == b"b"
+
+
+def test_set_config_escapes(tmp_path, monkeypatch):
+    import tomllib
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    cli._set_config("registry_user", 'a"b\\c')
+    cli._set_config("registry_user", "neu")
+    data = tomllib.loads((tmp_path / "pod-do" / "config.toml").read_text())
+    assert data == {"registry_user": "neu"}
+    cli._set_config("registry_user", 'x"y')
+    assert tomllib.loads((tmp_path / "pod-do" / "config.toml").read_text())["registry_user"] == 'x"y'
+
+
+def test_parse_status_and_progress():
+    from pod_do.task import JobStatus, bar, describe, parse_status, progress_of
+
+    out = (
+        "a-1\trunning\t\t1000\t\t0\t3 12 Bilder\tsome log\n"
+        "b-2\tdone\t0\t1000\t1130\t0\t\t 45%|####      | 45/100 [00:10<00:12]\n"
+        "c-3\tdone\t1\t1000\t1100\t1\t\t\t0\n"
+        "d-4\tdone\t0\t1000\t1100\t0\t\t\t1\n"
+        "@now 1200\n"
+    )
+    st = parse_status(out)
+    assert st["a-1"].state == "running" and st["a-1"].now == 1200
+    assert progress_of(st["a-1"]) == (0.25, "3/12 Bilder")
+    assert progress_of(st["b-2"]) == (0.45, "")
+    assert progress_of(JobStatus("x", "running", last="kein fortschritt")) == (None, "")
+    assert bar(0.5, 10) == "[#####-----]  50%"
+    line = describe(st["a-1"], 60)
+    assert "laeuft 3:20" in line and "25%" in line and "3/12 Bilder" in line
+    assert "NICHT abgeholt" in describe(st["b-2"], 60) and "etwa 59 min" in describe(st["b-2"], 60)
+    assert describe(st["c-3"], 60).endswith("abgeholt") and "Code 1" in describe(st["c-3"], 60)
+    assert "verloren" in describe(JobStatus("d", "gone"), 60)
+    assert st["d-4"].saved and "auf dem Volume gesichert" in describe(st["d-4"], 60)
+    assert "nur auf dem Pod" in describe(st["b-2"], 60)
+    assert "auf dem Volume" in describe(JobStatus("d", "gone"), 60, volume=True)
+    assert "verloren" in describe(JobStatus("d", "lost"), 60, volume=True)
+    assert describe(JobStatus("d", "gone", fetched=True), 60, volume=True) == "abgeholt"
+
+
+def test_no_save_without_volume(tmp_path):
+    sent = {}
+
+    class R:
+        def put_files(self, files, then=""):
+            sent.update(files)
+
+    Pods(None, GlobalConfig(ssh_key=None, volume=""), project(tmp_path)).start_job(
+        R(), "j", "echo", save=["out"]
+    )
+    assert list(sent) == ["/opt/pod-do/jobs/j/run.sh"]  # ohne Volume: nichts zu sichern
+
+
+def test_save_config_written(tmp_path):
+    from pod_do.pod import results_archive
+
+    sent = {}
+
+    class R:
+        def put_files(self, files, then=""):
+            sent.update(files)
+
+    p = project(tmp_path, TEMPLATE.replace("[env.main]", 'project = "Mein Projekt"\n[env.main]'))
+    Pods(None, GlobalConfig(ssh_key=None, keep_results_days=7), p).start_job(
+        R(), "j-1", "echo", save=["out", "extra/file.txt"]
+    )
+    conf = sent["/opt/pod-do/jobs/j-1/save.conf"][0]
+    assert "DEST=/vol/pod-do/results/Mein-Projekt/j-1.tar.zst" in conf and "DAYS=7" in conf
+    assert sent["/opt/pod-do/jobs/j-1/save.list"][0] == "out\nextra/file.txt\n"
+    assert results_archive("a/b c", "j") == "/vol/pod-do/results/a-b-c/j.tar.zst"

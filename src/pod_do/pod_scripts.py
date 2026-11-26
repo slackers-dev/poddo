@@ -24,6 +24,8 @@ export PATH="/opt/pod-do/bin:$PATH"
 export UV_PYTHON_INSTALL_DIR="$POD_DO_ENV/.python"
 export UV_CACHE_DIR=/opt/pod-do/cache/uv
 export UV_LINK_MODE=copy
+# .pyc gleich beim Installieren erzeugen: landen so im Archiv, der erste import auf jedem Pod ist schneller
+export UV_COMPILE_BYTECODE=1
 # Download-Caches in die Umgebung: so kommen Modelle, die erst beim ersten Lauf geladen werden, ins
 # Archiv. Nicht aufs Volume: Global Volumes koennen keine Dateien sperren, huggingface_hub braucht das.
 export HF_HOME="${HF_HOME:-$POD_DO_ENV/.cache/huggingface}"
@@ -71,27 +73,45 @@ if ! command -v uv >/dev/null; then
   curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/opt/pod-do/bin INSTALLER_NO_MODIFY_PATH=1 sh >/dev/null
 fi
 
+# boot (apt-get & Co.) laeuft im Hintergrund, waehrend die Umgebung vom Volume kommt. Beides ist
+# unabhaengig: boot landet nie in $POD_DO_ENV. Vor setup und vor dem Ende wird auf boot gewartet.
+BOOT_PID=""
 if [ -s /opt/pod-do/boot.sh ] && [ ! -f /opt/pod-do/.boot-ok ]; then
-  say "boot"
-  bash -eo pipefail /opt/pod-do/boot.sh
-  touch /opt/pod-do/.boot-ok
+  say "boot (im Hintergrund, Log: /opt/pod-do/boot.log)"
+  (bash -eo pipefail /opt/pod-do/boot.sh > /opt/pod-do/boot.log 2>&1 && touch /opt/pod-do/.boot-ok) &
+  BOOT_PID=$!
 fi
+wait_boot() {
+  [ -n "$BOOT_PID" ] || return 0
+  if ! wait "$BOOT_PID"; then
+    tail -n 40 /opt/pod-do/boot.log
+    say "boot fehlgeschlagen (ganzes Log: /opt/pod-do/boot.log)"
+    exit 1
+  fi
+  BOOT_PID=""
+  say "boot fertig"
+}
 
 if [ -f "$ENVS/$NAME/.pod-do-ok" ] && [ "$(cat "$ENVS/$NAME/.pod-do-ok")" = "$HASH" ]; then
   snapshot
+  wait_boot
   say "Umgebung $NAME ist bereit"
   exit 0
 fi
 
 if [ -n "$SNAP" ] && [ -f "$SNAP.ok" ] && [ -f "$SNAP" ]; then
   say "Umgebung $NAME vom Volume holen ($(du -h "$SNAP" | cut -f1))"
+  T0=$SECONDS
   rm -rf "${ENVS:?}/$NAME" && mkdir -p "$ENVS"
   zstd -dc -T0 "$SNAP" | tar -C "$ENVS" -xf -
   echo "$HASH" > "$ENVS/$NAME/.pod-do-ok"
+  say "geholt in $((SECONDS - T0)) s"
+  wait_boot
   say "Umgebung $NAME ist bereit"
   exit 0
 fi
 
+wait_boot
 say "setup fuer $NAME (einmalig, danach liegt es auf dem Volume)"
 rm -rf "${ENVS:?}/$NAME" && mkdir -p "$ENVS/$NAME"
 source /opt/pod-do/env.sh
@@ -108,14 +128,91 @@ say "Umgebung $NAME ist bereit"
 """
 
 # Startet ein Skript losgeloest von der SSH-Verbindung. Arg 1: Job-Ordner (mit run.sh).
+# Im Job-Ordner: started/finished (Unix-Zeit), exitcode, running solange er laeuft, fetched sobald pod-do
+# die Ergebnisse geholt hat, progress (von pod-do-progress), log.
 START_SH = r"""#!/usr/bin/env bash
 set -e
 JOB="$1"
 cd "$JOB"
-rm -f exitcode
+rm -f exitcode finished fetched saved progress
+date +%s > started
 touch running
-setsid nohup bash -c 'bash run.sh > log 2>&1; echo $? > exitcode; rm -f running' >/dev/null 2>&1 < /dev/null &
+# Erst sichern (save.sh), dann gilt der Job als fertig: so holt niemand halb gesicherte Ergebnisse ab
+setsid nohup bash -c 'bash run.sh > log 2>&1; echo $? > exitcode; date +%s > finished
+  [ -f save.conf ] && bash /opt/pod-do/save.sh >> save.log 2>&1; rm -f running' >/dev/null 2>&1 < /dev/null &
 echo $! > pid
+"""
+
+# Sichert die Ergebnisse eines fertigen Jobs auf dem Global Volume, damit sie den Pod ueberleben. Laeuft im
+# Job-Ordner. save.conf (von pod-do): DEST=<archiv>, DAYS=<alte Archive nach so vielen Tagen loeschen>.
+# save.list: die Pfade aus `download`, eine Zeile pro Pfad. Dazu kommen immer log und exitcode.
+SAVE_SH = r"""#!/usr/bin/env bash
+set -o pipefail
+source ./save.conf
+VOL=/vol
+# Ohne eingehaengtes Volume wuerde das Archiv auf der Pod-Disk landen und mit dem Pod verschwinden
+if ! grep -qs " $VOL " /proc/mounts; then echo "kein Volume unter $VOL, nicht gesichert"; exit 0; fi
+command -v zstd >/dev/null || { echo "zstd fehlt, nicht gesichert"; exit 0; }
+paths=(log exitcode)
+while IFS= read -r p; do [ -n "$p" ] && [ -e "$p" ] && paths+=("$p"); done < save.list
+mkdir -p "$(dirname "$DEST")"
+# Global Volumes kennen kein atomares Umbenennen: erst schreiben, dann .ok als Zeichen
+rm -f "$DEST.ok"
+if tar -cf - "${paths[@]}" | zstd -q -T0 -3 -o "$DEST" -f; then
+  echo ok > "$DEST.ok"
+  touch saved
+  echo "gesichert: $DEST ($(du -h "$DEST" | cut -f1))"
+else
+  rm -f "$DEST"
+  echo "sichern fehlgeschlagen"
+fi
+# Nie abgeholte Ergebnisse nach DAYS Tagen weg, damit das Volume nicht volllaeuft
+if [ "${DAYS:-0}" -gt 0 ]; then
+  find "$VOL/pod-do/results" -type f -name '*.tar.zst*' -mtime "+$DAYS" -delete 2>/dev/null
+fi
+true
+"""
+
+# Holt gesicherte Ergebnisse vom Volume zurueck in den Job-Ordner. Arg 1: Archiv, Arg 2: Job-Ordner.
+# Wird direkt mitgeschickt (bash -c), geht also auch auf Pods, die noch die alten Skripte haben.
+RESTORE_RESULTS_SH = r"""#!/usr/bin/env bash
+set -eo pipefail
+SRC="$1"; JOB="$2"
+[ -f "$SRC.ok" ] && [ -f "$SRC" ] || exit 3
+command -v zstd >/dev/null || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zstd >/dev/null; }
+mkdir -p "$JOB"
+zstd -dc "$SRC" | tar -C "$JOB" -xf -
+touch "$JOB/saved"
+"""
+
+# Fortschritt aus dem eigenen Skript melden: pod-do-progress <erledigt> <total> [text]
+PROGRESS_SH = r"""#!/usr/bin/env bash
+# pod-do-progress <erledigt> <total> [text]: Fortschritt fuer pod-do jobs und pod-do attach
+[ -n "$JOB" ] || { echo "pod-do-progress: nur in einer Aufgabe von pod-do" >&2; exit 0; }
+printf '%s %s %s\n' "${1:-0}" "${2:-0}" "${*:3}" > "$JOB/progress.tmp" && mv -f "$JOB/progress.tmp" "$JOB/progress"
+"""
+
+# Stand der Jobs, eine Zeile pro Job, Felder mit Tab getrennt. Argumente: Jobnamen (sonst alle ausser _*).
+# job, state (running|saving|done|missing), exitcode, started, finished, fetched (0/1), progress,
+# letzte Logzeile, saved (0/1: Ergebnisse auf dem Volume).
+# Zum Schluss "@now <Unix-Zeit>", damit die Uhr des Laptops keine Rolle spielt.
+STATUS_SH = r"""#!/usr/bin/env bash
+cd /opt/pod-do/jobs 2>/dev/null || { echo "@now $(date +%s)"; exit 0; }
+if [ $# -eq 0 ]; then set -- $(ls -1 | grep -v '^_'); fi
+for j in "$@"; do
+  if [ ! -d "$j" ]; then printf '%s\tmissing\t\t\t\t0\t\t\t0\n' "$j"; continue; fi
+  if [ -e "$j/running" ] && [ -f "$j/exitcode" ]; then st=saving
+  elif [ -e "$j/running" ]; then st=running
+  elif [ -f "$j/exitcode" ]; then st=done
+  else st=missing; fi
+  started=$(cat "$j/started" 2>/dev/null || stat -c %Y "$j/run.sh" 2>/dev/null)
+  last=$(tail -c 4000 "$j/log" 2>/dev/null | tr '\r' '\n' | sed 's/\x1b\[[0-9;]*[A-Za-z]//g' \
+    | grep -v '^[[:space:]]*$' | tail -n 1 | tr '\t' ' ' | cut -c1-200)
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$j" "$st" "$(cat "$j/exitcode" 2>/dev/null)" "$started" \
+    "$(cat "$j/finished" 2>/dev/null)" "$([ -e "$j/fetched" ] && echo 1 || echo 0)" \
+    "$(head -c 200 "$j/progress" 2>/dev/null | tr '\t\n' '  ')" "$last" "$([ -e "$j/saved" ] && echo 1 || echo 0)"
+done
+echo "@now $(date +%s)"
 """
 
 # Zeigt das Log eines Jobs, bis er fertig ist. Gibt dessen Exit-Code zurueck.
@@ -133,10 +230,12 @@ wait $T 2>/dev/null
 exit 98
 """
 
-# Loescht den Pod, wenn er zu lange nichts tut oder zu lange laeuft. Arg 1: Minuten, Arg 2: Stunden.
+# Loescht den Pod, wenn er zu lange nichts tut oder zu lange laeuft. Arg 1: Minuten Leerlauf, Arg 2: Stunden
+# hoechstens, Arg 3: Minuten Leerlauf, solange ein fertiger Job noch nicht abgeholte Ergebnisse hat.
 WATCHDOG_SH = r"""#!/usr/bin/env bash
 IDLE_MIN="${1:-20}"
 MAX_H="${2:-6}"
+KEEP_MIN="${3:-$IDLE_MIN}"
 LOG=/opt/pod-do/watchdog.log
 # Variablen von RunPod stehen nur im Hauptprozess, nicht in SSH-Sitzungen
 envof() { tr '\0' '\n' < /proc/1/environ 2>/dev/null | sed -n "s/^$1=//p" | head -n1; }
@@ -161,7 +260,7 @@ terminate() {
   exit 0
 }
 
-echo "$(date -Is) Waechter: ${IDLE_MIN} min Leerlauf, hoechstens ${MAX_H} h" >> "$LOG"
+echo "$(date -Is) Waechter: ${IDLE_MIN} min Leerlauf (${KEEP_MIN} min mit nicht abgeholten Ergebnissen), hoechstens ${MAX_H} h" >> "$LOG"
 while true; do
   sleep 60
   now=$(date +%s)
@@ -170,11 +269,19 @@ while true; do
   fi
   busy=0
   ls /opt/pod-do/jobs/*/running >/dev/null 2>&1 && busy=1
-  pgrep -f 'sshd: .*@' >/dev/null 2>&1 && busy=1
+  # offene SSH-Sitzung (ab OpenSSH 9.8 heisst der Prozess sshd-session)
+  pgrep -f 'sshd(-session)?: .*@' >/dev/null 2>&1 && busy=1
   # pod-do touch: kurz "ich bin noch da"
   if [ -f /opt/pod-do/keepalive ] && [ $(( now - $(stat -c %Y /opt/pod-do/keepalive) )) -lt 120 ]; then busy=1; fi
   if [ $busy = 1 ]; then idle=0; else idle=$((idle + 1)); fi
-  if [ "$idle" -ge "$IDLE_MIN" ]; then terminate "${IDLE_MIN} min Leerlauf"; fi
+  # Fertige Jobs, deren Ergebnisse pod-do noch nicht geholt hat: laenger warten (Ergebnisse waeren sonst weg)
+  limit=$IDLE_MIN
+  for d in /opt/pod-do/jobs/*/; do
+    case "$(basename "$d")" in _*) continue ;; esac
+    # auf dem Volume gesichert (saved) ist so gut wie abgeholt
+    if [ -f "$d/exitcode" ] && [ ! -e "$d/fetched" ] && [ ! -e "$d/saved" ]; then limit=$KEEP_MIN; break; fi
+  done
+  if [ "$idle" -ge "$limit" ]; then terminate "${limit} min Leerlauf"; fi
 done
 """
 
@@ -183,7 +290,7 @@ mkdir -p /opt/pod-do
 if [ -f /opt/pod-do/watchdog.pid ] && kill -0 "$(cat /opt/pod-do/watchdog.pid)" 2>/dev/null; then
   kill "$(cat /opt/pod-do/watchdog.pid)" 2>/dev/null || true
 fi
-setsid nohup bash /opt/pod-do/watchdog.sh @IDLE@ @MAX@ >/dev/null 2>&1 < /dev/null &
+setsid nohup bash /opt/pod-do/watchdog.sh @IDLE@ @MAX@ @KEEP@ >/dev/null 2>&1 < /dev/null &
 echo $! > /opt/pod-do/watchdog.pid
 """
 

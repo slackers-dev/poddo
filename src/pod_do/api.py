@@ -32,12 +32,16 @@ Transport = Callable[[str, str, dict[str, str], bytes | None], tuple[int, bytes]
 
 
 def urllib_transport(method: str, url: str, headers: dict[str, str], body: bytes | None) -> tuple[int, bytes]:
+    """Status 0 = keine Antwort (Netz weg, Zeitueberschreitung)."""
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:
         return e.code, e.read()
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+        reason = getattr(e, "reason", e)
+        return 0, json.dumps({"title": "Netzwerk", "detail": str(reason)}).encode()
 
 
 @dataclass
@@ -45,6 +49,7 @@ class Ssh:
     host: str
     port: int
     user: str
+    pod_id: str = ""  # fuer den Host-Schluessel: gemerkt pro Pod, nicht pro host:port
 
 
 class RunPod:
@@ -73,13 +78,16 @@ class RunPod:
         if body is not None:
             data = json.dumps(body).encode()
             headers["Content-Type"] = "application/json"
+        # GET und DELETE darf man wiederholen. POST nicht bei 5xx oder ohne Antwort: Vielleicht hat RunPod
+        # den Pod schon angelegt, ein zweiter Versuch saehe dann einen zweiten Pod (ohne Waechter).
+        # 429 heisst "nicht bearbeitet", das geht immer nochmals.
+        idempotent = method in ("GET", "HEAD", "DELETE")
         for attempt in range(5):
             status, raw = self._transport(method, url, headers, data)
-            # 429 und 5xx sind voruebergehend: kurz warten, nochmals
-            if status == 429 or status >= 500:
-                if attempt < 4:
-                    time.sleep(2 * (attempt + 1))
-                    continue
+            transient = status == 429 or (idempotent and (status == 0 or status >= 500))
+            if transient and attempt < 4:
+                time.sleep(2 * (attempt + 1))
+                continue
             break
         payload: Any = None
         if raw:
@@ -87,7 +95,7 @@ class RunPod:
                 payload = json.loads(raw)
             except json.JSONDecodeError:
                 payload = {"detail": raw.decode(errors="replace")[:500]}
-        if status >= 400:
+        if status >= 400 or status == 0:
             p = payload if isinstance(payload, dict) else {}
             raise ApiError(status, p.get("title", ""), p.get("detail", ""), p.get("errors"))
         return payload
@@ -153,4 +161,5 @@ def ssh_of(pod: dict) -> Ssh | None:
     d = (pod.get("ssh") or {}).get("direct")
     if not d:
         return None
-    return Ssh(host=d["host"], port=int(d["port"]), user=d.get("username") or "root")
+    user = d.get("username") or "root"
+    return Ssh(host=d["host"], port=int(d["port"]), user=user, pod_id=pod.get("id", ""))

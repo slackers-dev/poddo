@@ -22,10 +22,17 @@ pod-do down                                # Pod sofort weg (sonst nach 20 min L
 - **Keine Bindung an ein Rechenzentrum.** Ein Network Volume hängt an einem Rechenzentrum. Ist dort keine
   GPU frei, kommt man nicht an seine Daten. Ein Global Volume geht überall (die ersten 100 GB sind gratis),
   darum kann pod-do einfach die erste freie GPU aus deiner Liste nehmen.
-- **Jobs laufen losgelöst von der Verbindung.** Bricht die Verbindung ab oder drückst du Ctrl-C, rechnet der
-  Pod weiter. `pod-do attach` hängt sich wieder an und holt das Ergebnis.
+- **Jobs laufen losgelöst von der Verbindung.** Bricht die Verbindung ab, drückst du Ctrl-C oder klappst du
+  den Laptop zu, rechnet der Pod weiter. `pod-do attach` hängt sich wieder an und holt das Ergebnis.
+  `pod-do run --detach` startet nur und kehrt sofort zurück.
 - **Wächter gegen vergessene Pods.** Der Pod löscht sich nach `idle_minutes` ohne Job und ohne SSH-Sitzung
-  selbst, spätestens nach `max_hours`.
+  selbst, spätestens nach `max_hours`. Kommt ein eben angelegter Pod nicht bis zum Wächter (kein SSH,
+  Ctrl-C, Fehler), löscht pod-do ihn sofort wieder. Das Anlegen wiederholt pod-do bei Server- oder
+  Netzfehlern nie, damit nicht unbemerkt ein zweiter Pod entsteht.
+- **Eine SSH-Verbindung pro Pod.** Alle Befehle laufen über eine gemeinsame Verbindung (ControlMaster,
+  hält 2 Minuten nach dem letzten Befehl), die Skripte gehen in einem einzigen tar hinüber. Der
+  Host-Schlüssel wird beim ersten Kontakt pro Pod gemerkt (`~/.local/state/pod-do/known_hosts`) und danach
+  geprüft.
 - **Optional als Docker-Image.** Die fertige Umgebung kann auch als Image in einer Registry liegen,
   gebaut direkt auf dem Pod (siehe unten).
 - **Nur Standardbibliothek.** Python ab 3.11, ssh und tar. Spricht die RunPod REST API v2.
@@ -56,6 +63,8 @@ gpus = ["NVIDIA RTX A4500", "NVIDIA RTX A4000", "NVIDIA A40"]   # Reihenfolge = 
 idle_minutes = 20
 wait_minutes = 10           # ist keine GPU frei: so lange alle 30 s nochmals versuchen
 max_hours = 6
+keep_results_minutes = 60   # Ergebnisse nicht abgeholt und nicht auf dem Volume: so lange wartet der Pod
+keep_results_days = 30      # nie abgeholte Ergebnisse auf dem Volume nach so vielen Tagen löschen (0 = nie)
 ```
 
 ## In einem Projekt verwenden
@@ -113,7 +122,12 @@ Grossbuchstaben bereit (`$FOTOS`, `$NAME`). Dazu kommen:
 **Was ins Setup gehört:** alles, was lange dauert und sich selten ändert, auch Modelle. Es muss nach `$POD_DO_ENV`
 installieren (das ist auch das Arbeitsverzeichnis). Eine venv mit `uv venv` dort anlegen; pod-do setzt
 `UV_PYTHON_INSTALL_DIR`, damit auch Python selbst in `$POD_DO_ENV` liegt und das Archiv auf jedem Pod
-funktioniert. `uv` ist auf dem Pod schon da. Systempakete (apt) gehören in `boot`, die landen nicht im Archiv.
+funktioniert. `uv` ist auf dem Pod schon da und legt `.pyc`-Dateien gleich beim Installieren an
+(`UV_COMPILE_BYTECODE`), damit der erste `import` auf jedem Pod schneller ist. Systempakete (apt) gehören in
+`boot`, die landen nicht im Archiv. `boot` läuft im Hintergrund, während die Umgebung vom Volume kommt
+(Log: `/opt/pod-do/boot.log`), darf sich also nicht auf `$POD_DO_ENV` verlassen.
+
+Namen von Umgebungen und Aufgaben: nur Buchstaben, Ziffern, `_`, `.` und `-`.
 
 **Neu einrichten:** Ändert sich `image` oder `setup`, richtet pod-do automatisch neu ein und ersetzt das
 Archiv. Achtung: Dazu zählt jede Änderung am Setup-Skript, auch an Kommentaren.
@@ -145,7 +159,8 @@ Von Hand: `pod-do image <env>`, nur prüfen: `pod-do image <env> --check`.
    `runpod_registry`), damit Pods das private Image ziehen können. Braucht einen API-Schlüssel mit dem Recht
    «Secrets». Oder in der RunPod-Konsole unter *Settings → Container Registry Auth* von Hand.
 
-Der Token geht beim Hochladen nur über SSH-stdin an den Pod, er steht nie in dessen Umgebung. Fehlt der
+Der Token geht beim Hochladen nur über SSH-stdin an den Pod, er steht nie in dessen Umgebung, und nach dem
+Hochladen meldet sich crane wieder ab. Fehlt der
 Zugang, arbeitet pod-do mit einem Hinweis wie ohne `docker` weiter.
 
 **Was nicht ins Image kommt:** Systempakete aus `boot` (die laufen weiter bei jedem Start) und alles
@@ -155,9 +170,11 @@ ausserhalb von `$POD_DO_ENV`. Images mit Modellen, die nur für Forschung freige
 
 | Befehl | Was |
 |---|---|
-| `pod-do run <aufgabe> [args]` | Pod suchen oder starten, Umgebung herstellen, hochladen, rechnen, holen. `--down` löscht danach, `--gpu <id>` wählt die Karte, `--wait <min>` wartet auf eine freie |
+| `pod-do run <aufgabe> [args]` | Pod suchen oder starten, Umgebung herstellen, hochladen, rechnen, holen. `--detach` startet nur, `--down` löscht danach, `--gpu <id>` wählt die Karte, `--wait <min>` wartet auf eine freie |
 | `pod-do up [env]` | nur Pod starten und bereitmachen |
 | `pod-do attach [job]` | wieder an einen Job hängen (Standard: der letzte), dann Ergebnis holen |
+| `pod-do jobs [--watch]` | letzte Jobs mit Stand und Fortschritt |
+| `pod-do logs [job] [-f]` | Log eines Jobs, mit `-f` mitlesen |
 | `pod-do ssh [env]` | Shell auf dem Pod |
 | `pod-do status` | Guthaben, laufende pod-do-Pods, Volume |
 | `pod-do down [env]` / `--all` | Pods dieses Projekts löschen, oder alle pod-do-Pods |
@@ -166,6 +183,40 @@ ausserhalb von `$POD_DO_ENV`. Images mit Modellen, die nur für Forschung freige
 | `pod-do volume [--create]` | Global Volume anzeigen oder anlegen |
 | `pod-do image [env] [--check]` | Umgebung als Docker-Image bauen und hochladen (`docker = ...`) |
 | `pod-do registry login\|runpod [host] [--user]` | Zugang zur Registry lokal oder bei RunPod hinterlegen |
+
+## Ergebnisse abholen
+
+Am Ende jedes Jobs sichert der Pod die Pfade aus `download` (dazu `log` und `exitcode`) auf dem **Global
+Volume**, unter `/vol/pod-do/results/<projekt>/<job>.tar.zst`. Erst danach gilt der Job als fertig. So
+überleben die Ergebnisse den Pod, auch wenn der Laptop aus ist und der Wächter den Pod löscht.
+
+- **`pod-do attach [job]`** holt die Ergebnisse: vom Pod, wenn er noch läuft, sonst vom Volume. Dafür nimmt
+  pod-do einen laufenden Pod des Projekts oder startet kurz einen (ohne Umgebung herzustellen, etwa eine Minute,
+  ungefähr 1 Rappen) und löscht ihn danach wieder.
+- **`pod-do run`** holt nebenbei alle Ergebnisse früherer Jobs, die noch auf dem Volume liegen, gratis, weil
+  der Pod sowieso läuft.
+- Nach dem Herunterladen löscht pod-do die Kopie auf dem Volume. Nie abgeholte Kopien löscht der Pod nach
+  `keep_results_days` (Standard 30) Tagen.
+- Ist ein Job gesichert, löscht der Wächter den Pod nach der normalen Leerlaufzeit (`idle_minutes`). Ohne
+  Volume oder wenn das Sichern nicht ging, wartet er `keep_results_minutes` (Standard 60), weil die Ergebnisse
+  dann nur auf dem Pod liegen. Das Warten kostet GPU-Zeit.
+- Verloren sind Ergebnisse nur, wenn der Job nicht fertig wurde, bevor der Pod gelöscht wurde (etwa nach
+  `max_hours`), oder ohne Volume.
+- Koppelst du dich ab (Ctrl-C, `--detach`, Verbindung weg), zeigt pod-do gut sichtbar, wie du die Ergebnisse
+  holst. `pod-do status` listet alle Jobs, deren Ergebnisse noch fehlen.
+- Auf dem Mac kommt zusätzlich eine Mitteilung, wenn pod-do die Ergebnisse geholt hat.
+
+## Stand und Fortschritt
+
+```sh
+pod-do jobs            # letzte Jobs: läuft (mit Fortschrittsbalken), fertig, abgeholt oder verloren
+pod-do jobs --watch    # alle 5 s neu
+pod-do logs -f         # Log des letzten Jobs mitlesen, bis er fertig ist
+```
+
+Den Fortschritt liest pod-do aus einer [tqdm](https://github.com/tqdm/tqdm)-Zeile im Log, ohne dass du etwas
+tun musst. Genauer geht es aus dem eigenen Skript mit `pod-do-progress <erledigt> <total> [text]`, z. B.
+`pod-do-progress 7 12 "Bild 7"`.
 
 ## Kosten
 
@@ -176,8 +227,11 @@ ausserhalb von `$POD_DO_ENV`. Images mit Modellen, die nur für Forschung freige
 
 ## Auf dem Pod
 
-Alles von pod-do liegt unter `/opt/pod-do`: `envs/`, `jobs/<job>/` (run.sh, log, exitcode), `watchdog.log`.
-Das Volume ist unter `/vol` eingehängt, die Archive liegen in `/vol/pod-do/envs/`.
+Alles von pod-do liegt unter `/opt/pod-do`: `envs/`, `jobs/<job>/` (run.sh, log, exitcode, started,
+finished, progress, saved, fetched), `boot.log`,
+`watchdog.log`.
+Das Volume ist unter `/vol` eingehängt, die Archive der Umgebungen liegen in `/vol/pod-do/envs/`, gesicherte
+Ergebnisse in `/vol/pod-do/results/`.
 
 ## Grenzen
 
