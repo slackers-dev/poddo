@@ -225,3 +225,19 @@ def test_pod_scripts_are_valid_bash():
     for name in ("BOOTSTRAP_SH", "START_SH", "FOLLOW_SH", "WATCHDOG_SH", "START_WATCHDOG", "ENV_SH"):
         r = subprocess.run(["bash", "-n"], input=getattr(S, name), text=True, capture_output=True)
         assert r.returncode == 0, f"{name}: {r.stderr}"
+
+
+def test_dotenv_key(tmp_path, monkeypatch):
+    from pod_do.config import api_key, dotenv_key
+
+    sub = tmp_path / "a" / "b"
+    sub.mkdir(parents=True)
+    assert dotenv_key(sub) == ""
+    (tmp_path / ".env").write_text("# kommentar\nOTHER=1\nexport POD_API_KEY='abc123'\n")
+    assert dotenv_key(sub) == "abc123"
+    monkeypatch.delenv("RUNPOD_API_KEY", raising=False)
+    monkeypatch.delenv("POD_API_KEY", raising=False)
+    monkeypatch.chdir(sub)
+    assert api_key() == "abc123"
+    monkeypatch.setenv("RUNPOD_API_KEY", "vonenv")
+    assert api_key() == "vonenv"

@@ -73,9 +73,35 @@ def find_ssh_key() -> Path | None:
 # -- API-Schluessel ---------------------------------------------------------------------------------
 
 
+ENV_KEYS = ("RUNPOD_API_KEY", "POD_API_KEY")
+
+
+def dotenv_key(start: Path | None = None) -> str:
+    """Schluessel aus der naechsten .env (hier oder darueber), RUNPOD_API_KEY oder POD_API_KEY."""
+    d = (start or Path.cwd()).resolve()
+    for p in [d, *d.parents]:
+        f = p / ".env"
+        if not f.is_file():
+            continue
+        for line in f.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("export "):
+                line = line[7:].lstrip()
+            name, sep, value = line.partition("=")
+            if sep and name.strip() in ENV_KEYS:
+                value = value.strip().strip("'\"")
+                if value:
+                    return value
+    return ""
+
+
 def api_key() -> str:
-    """RUNPOD_API_KEY, sonst macOS-Schluesselbund, sonst ~/.config/pod-do/api_key."""
-    key = os.environ.get("RUNPOD_API_KEY", "").strip()
+    """Umgebungsvariable, sonst .env, sonst macOS-Schluesselbund, sonst ~/.config/pod-do/api_key."""
+    for name in ENV_KEYS:
+        key = os.environ.get(name, "").strip()
+        if key:
+            return key
+    key = dotenv_key()
     if key:
         return key
     if sys.platform == "darwin" and shutil.which("security"):

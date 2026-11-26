@@ -37,8 +37,9 @@ pod-do volume --create  # Global Volume "pod-do" anlegen
 pod-do gpus --min-vram 8
 ```
 
-Der API-Schlüssel kommt aus `RUNPOD_API_KEY`, sonst aus dem Schlüsselbund (Eintrag `pod-do`), sonst aus
-`~/.config/pod-do/api_key`. Er landet nie in einem Projekt.
+Der API-Schlüssel kommt aus der Umgebungsvariable `RUNPOD_API_KEY` oder `POD_API_KEY`, sonst aus der
+nächsten `.env` (im aktuellen Ordner oder darüber, gleiche Namen), sonst aus dem Schlüsselbund (Eintrag
+`pod-do`), sonst aus `~/.config/pod-do/api_key`. Eine `.env` gehört in `.gitignore`.
 
 SSH: pod-do nimmt `~/.ssh/id_runpod`, `~/.ssh/id_ed25519` oder `~/.ssh/id_rsa` (den ersten, den es gibt) und
 gibt den öffentlichen Schlüssel dem Pod mit. In der RunPod-Konsole muss nichts eingetragen werden.
