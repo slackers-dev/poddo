@@ -95,15 +95,10 @@ class Pods:
 
     # -- Anlegen ----------------------------------------------------------------------------------
 
-    def create(self, env: EnvSpec, gpu_override: list[str] | None = None) -> dict:
+    def create(self, env: EnvSpec, gpu_override: list[str] | None = None, wait_minutes: float = 0) -> dict:
+        """Erste freie GPU aus der Liste. Ist keine frei, alle 30 s nochmals, bis `wait_minutes` um sind."""
         cloud = env.cloud or self.cfg.cloud
         wanted = gpu_override or env.gpus or self.cfg.gpus
-        cands = gpu_candidates(self.api, wanted, env.min_vram, cloud)
-        if not cands:
-            raise ConfigError(
-                f"Keine der GPUs ist gerade frei ({', '.join(wanted)}). "
-                "pod-do gpus zeigt, was es gibt; mit --gpu eine andere waehlen."
-            )
         key = self.cfg.ssh_key
         if not key:
             raise ConfigError(
@@ -127,8 +122,23 @@ class Pods:
         }
         if vol:
             body["mounts"] = {"global": [{"volumeId": vol, "path": VOLUME_PATH}]}
-        last: Exception | None = None
-        for c in cands:
+        deadline = time.time() + wait_minutes * 60
+        while True:
+            pod = self._try_create(body, env, wanted, cloud)
+            if pod:
+                return pod
+            if time.time() >= deadline:
+                hint = "" if wait_minutes else " Mit --wait <minuten> wartet pod-do auf eine freie Karte."
+                raise ConfigError(
+                    f"Keine der GPUs ist gerade frei ({', '.join(wanted)}).{hint} "
+                    "pod-do gpus zeigt, was es gibt; --gpu waehlt andere."
+                )
+            left = int((deadline - time.time()) / 60)
+            say(f"keine GPU frei, versuche in 30 s nochmals (noch etwa {left} min)")
+            time.sleep(30)
+
+    def _try_create(self, body: dict, env: EnvSpec, wanted: list[str], cloud: str) -> dict | None:
+        for c in gpu_candidates(self.api, wanted, env.min_vram, cloud):
             gpu: dict = {"id": c.gpu, "count": 1}
             if env.cuda:
                 gpu["minCudaVersion"] = env.cuda
@@ -138,12 +148,12 @@ class Pods:
                 say(f"Pod {pod['id']} angelegt: {c.name}, ${pod.get('cost', c.price):.2f}/h")
                 return pod
             except ApiError as e:
-                last = e
+                # 400: Karte gerade weg, 403/404: kein Zugriff. Naechste versuchen. 402 (Guthaben) nicht.
                 if e.status in (400, 403, 404):
                     say(f"  geht nicht: {e.detail or e.title}")
                     continue
                 raise
-        raise ConfigError(f"Keine GPU bekommen. Letzter Fehler: {last}")
+        return None
 
     # -- Bereit machen ----------------------------------------------------------------------------
 
@@ -227,7 +237,9 @@ class Pods:
 
     # -- Alles zusammen ---------------------------------------------------------------------------
 
-    def ensure(self, env_name: str, gpu_override: list[str] | None = None) -> tuple[dict, Remote]:
+    def ensure(
+        self, env_name: str, gpu_override: list[str] | None = None, wait_minutes: float | None = None
+    ) -> tuple[dict, Remote]:
         if env_name not in self.project.envs:
             raise ConfigError(f"Umgebung {env_name!r} gibt es nicht in pod-do.toml")
         env = self.project.envs[env_name]
@@ -235,7 +247,8 @@ class Pods:
         if pod:
             say(f"nehme laufenden Pod {pod['id']} ({pod.get('gpu', {}).get('id', '?')})")
         else:
-            pod = self.create(env, gpu_override)
+            wait = self.cfg.wait_minutes if wait_minutes is None else wait_minutes
+            pod = self.create(env, gpu_override, wait)
         r = self.wait_ssh(pod)
         self.prepare(r, env)
         return pod, r

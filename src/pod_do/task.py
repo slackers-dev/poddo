@@ -70,7 +70,12 @@ class Runner:
         self.project = project
 
     def run(
-        self, task_name: str, args: list[str], gpu: list[str] | None = None, down: bool | None = None
+        self,
+        task_name: str,
+        args: list[str],
+        gpu: list[str] | None = None,
+        down: bool | None = None,
+        wait_minutes: float | None = None,
     ) -> int:
         task = self.project.tasks.get(task_name)
         if not task:
@@ -80,7 +85,7 @@ class Runner:
         values = resolve_args(task, args, Path.cwd())
         local_hook(task.before, values, self.project.root, "before")
 
-        pod, r = self.pods.ensure(task.env, gpu)
+        pod, r = self.pods.ensure(task.env, gpu, wait_minutes)
         job = f"{task.name}-{time.strftime('%Y%m%d-%H%M%S')}"
         jobdir = f"{S.ROOT}/jobs/{job}"
         self._save(job, task, values, pod)

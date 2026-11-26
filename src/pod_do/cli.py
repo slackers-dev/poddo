@@ -85,7 +85,7 @@ def cmd_gpus(a) -> int:
 def cmd_up(a) -> int:
     cfg, api, project = _ctx()
     pods = Pods(api, cfg, project)
-    pod, _ = pods.ensure(_env_arg(project, a.env), a.gpu)
+    pod, _ = pods.ensure(_env_arg(project, a.env), a.gpu, a.wait)
     print(pod["id"])
     return 0
 
@@ -94,7 +94,7 @@ def cmd_run(a) -> int:
     cfg, api, project = _ctx()
     runner = Runner(Pods(api, cfg, project), project)
     down = True if a.down else (False if a.keep else None)
-    return runner.run(a.task, a.args, a.gpu, down)
+    return runner.run(a.task, a.args, a.gpu, down, a.wait)
 
 
 def cmd_attach(a) -> int:
@@ -206,12 +206,18 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("up", help="Pod starten und Umgebung bereitmachen")
     s.add_argument("env", nargs="?")
     s.add_argument("--gpu", action="append", help="GPU-ID, mehrfach fuer Ausweichkarten")
+    s.add_argument(
+        "--wait", type=float, metavar="MIN", help="so lange auf eine freie GPU warten (Standard 10)"
+    )
     s.set_defaults(fn=cmd_up)
 
     s = sub.add_parser("run", help="Aufgabe rechnen: hochladen, rechnen, Ergebnis holen")
     s.add_argument("task")
     s.add_argument("args", nargs="*")
     s.add_argument("--gpu", action="append", help="GPU-ID, mehrfach fuer Ausweichkarten")
+    s.add_argument(
+        "--wait", type=float, metavar="MIN", help="so lange auf eine freie GPU warten (Standard 10)"
+    )
     g = s.add_mutually_exclusive_group()
     g.add_argument("--down", action="store_true", help="Pod danach sofort loeschen")
     g.add_argument("--keep", action="store_true", help="Pod danach laufen lassen (Standard)")

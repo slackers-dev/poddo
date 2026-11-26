@@ -52,6 +52,7 @@ volume = "pod-do"           # Name des Global Volume, "" = ohne (dann läuft set
 cloud = "SECURE"            # oder "COMMUNITY" (günstiger, nicht jede Maschine hat eine öffentliche IP)
 gpus = ["NVIDIA RTX A4500", "NVIDIA RTX A4000", "NVIDIA A40"]   # Reihenfolge = Vorliebe
 idle_minutes = 20
+wait_minutes = 10           # ist keine GPU frei: so lange alle 30 s nochmals versuchen
 max_hours = 6
 ```
 
@@ -119,7 +120,7 @@ Archiv. Achtung: Dazu zählt jede Änderung am Setup-Skript, auch an Kommentaren
 
 | Befehl | Was |
 |---|---|
-| `pod-do run <aufgabe> [args]` | Pod suchen oder starten, Umgebung herstellen, hochladen, rechnen, holen. `--down` löscht danach, `--gpu <id>` wählt die Karte |
+| `pod-do run <aufgabe> [args]` | Pod suchen oder starten, Umgebung herstellen, hochladen, rechnen, holen. `--down` löscht danach, `--gpu <id>` wählt die Karte, `--wait <min>` wartet auf eine freie |
 | `pod-do up [env]` | nur Pod starten und bereitmachen |
 | `pod-do attach [job]` | wieder an einen Job hängen (Standard: der letzte), dann Ergebnis holen |
 | `pod-do ssh [env]` | Shell auf dem Pod |

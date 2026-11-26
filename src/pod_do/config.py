@@ -43,6 +43,7 @@ class GlobalConfig:
     cloud: str = "SECURE"
     gpus: list[str] = field(default_factory=lambda: list(DEFAULT_GPUS))
     idle_minutes: int = 20
+    wait_minutes: float = 10  # so lange auf eine freie GPU warten
     max_hours: float = 6.0
 
     @classmethod
@@ -54,7 +55,7 @@ class GlobalConfig:
         cfg = cls()
         if "ssh_key" in data:
             cfg.ssh_key = Path(data["ssh_key"]).expanduser()
-        for k in ("volume", "cloud", "gpus", "idle_minutes", "max_hours"):
+        for k in ("volume", "cloud", "gpus", "idle_minutes", "wait_minutes", "max_hours"):
             if k in data:
                 setattr(cfg, k, data[k])
         if cfg.ssh_key is None:

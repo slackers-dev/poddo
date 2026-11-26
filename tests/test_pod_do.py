@@ -241,3 +241,43 @@ def test_dotenv_key(tmp_path, monkeypatch):
     assert api_key() == "abc123"
     monkeypatch.setenv("RUNPOD_API_KEY", "vonenv")
     assert api_key() == "vonenv"
+
+
+def test_create_waits_for_gpu(tmp_path, monkeypatch):
+    import pod_do.pod as podmod
+
+    key = tmp_path / "k"
+    key.write_text("")
+    (tmp_path / "k.pub").write_text("ssh-ed25519 A")
+    sold_out = {"gpus": [dict(GPUS["gpus"][2], availability="LOW")]}
+    fake = FakeApi(
+        {
+            ("GET", "/v2/catalog/gpus"): [(200, sold_out)],
+            ("GET", "/v2/global-volumes"): [(200, {"globalVolumes": [], "pagination": {}})],
+            ("POST", "/v2/pods"): [
+                (400, {"title": "Bad Request", "status": 400, "detail": "weg"}),
+                (201, {"id": "p2", "name": "x", "status": "PROVISIONING"}),
+            ],
+        }
+    )
+    sleeps = []
+    monkeypatch.setattr(podmod.time, "sleep", lambda s: sleeps.append(s))
+    p = project(tmp_path)
+    cfg = GlobalConfig(ssh_key=key, gpus=["NVIDIA A40"])
+    pods = Pods(RunPod("k", transport=fake), cfg, p)
+    with pytest.raises(ConfigError, match="--wait"):
+        Pods(
+            RunPod(
+                "k",
+                transport=FakeApi(
+                    {
+                        **fake.rules,
+                        ("POST", "/v2/pods"): [(400, {"title": "", "status": 400, "detail": "weg"})],
+                    }
+                ),
+            ),
+            cfg,
+            p,
+        ).create(p.envs["main"])
+    assert pods.create(p.envs["main"], wait_minutes=5)["id"] == "p2"
+    assert sleeps == [30]
