@@ -24,8 +24,10 @@ export PATH="/opt/pod-do/bin:$PATH"
 export UV_PYTHON_INSTALL_DIR="$POD_DO_ENV/.python"
 export UV_CACHE_DIR=/opt/pod-do/cache/uv
 export UV_LINK_MODE=copy
-# HF_HOME bleibt lokal: Global Volumes koennen keine Dateien sperren, huggingface_hub braucht das
-export HF_HOME="${HF_HOME:-/opt/pod-do/cache/huggingface}"
+# Download-Caches in die Umgebung: so kommen Modelle, die erst beim ersten Lauf geladen werden, ins
+# Archiv. Nicht aufs Volume: Global Volumes koennen keine Dateien sperren, huggingface_hub braucht das.
+export HF_HOME="${HF_HOME:-$POD_DO_ENV/.cache/huggingface}"
+export TORCH_HOME="${TORCH_HOME:-$POD_DO_ENV/.cache/torch}"
 mkdir -p "$POD_DO_ENV" "$POD_DO_CACHE" "$UV_CACHE_DIR" 2>/dev/null || true
 @VARS@
 """
@@ -40,6 +42,21 @@ ENVS=/opt/pod-do/envs
 SNAPDIR="${POD_DO_VOLUME:+$POD_DO_VOLUME/pod-do/envs}"
 SNAP="${SNAPDIR:+$SNAPDIR/$NAME-$HASH.tar.zst}"
 say() { printf '\n[pod-do] %s\n' "$*"; }
+snapshot() {
+  [ -n "$SNAP" ] || return 0
+  [ -f "$SNAP.ok" ] && [ -f "$SNAP" ] && return 0
+  say "Umgebung auf dem Volume sichern ($(du -sh "$ENVS/$NAME" | cut -f1), dauert etwas)"
+  mkdir -p "$SNAPDIR"
+  # Global Volumes kennen kein atomares Umbenennen: erst schreiben, dann .ok-Datei als Zeichen
+  rm -f "$SNAP.ok"
+  tar -C "$ENVS" -cf - "$NAME" | zstd -q -T0 -3 -o "$SNAP" -f
+  echo ok > "$SNAP.ok"
+  # alte Staende derselben Umgebung weg
+  for f in "$SNAPDIR/$NAME"-*.tar.zst; do
+    [ "$f" = "$SNAP" ] || rm -f "$f" "$f.ok"
+  done
+  say "gesichert: $SNAP ($(du -h "$SNAP" | cut -f1))"
+}
 
 say "Werkzeuge"
 need=()
@@ -58,6 +75,7 @@ if [ -s /opt/pod-do/boot.sh ] && [ ! -f /opt/pod-do/.boot-ok ]; then
 fi
 
 if [ -f "$ENVS/$NAME/.pod-do-ok" ] && [ "$(cat "$ENVS/$NAME/.pod-do-ok")" = "$HASH" ]; then
+  snapshot
   say "Umgebung $NAME ist bereit"
   exit 0
 fi
@@ -79,17 +97,7 @@ bash -eo pipefail /opt/pod-do/setup.sh
 echo "$HASH" > "$ENVS/$NAME/.pod-do-ok"
 
 if [ -n "$SNAP" ]; then
-  say "Umgebung auf dem Volume sichern"
-  mkdir -p "$SNAPDIR"
-  # Global Volumes kennen kein atomares Umbenennen: erst schreiben, dann .ok-Datei als Zeichen
-  rm -f "$SNAP.ok"
-  tar -C "$ENVS" -cf - "$NAME" | zstd -q -T0 -3 -o "$SNAP" -f
-  echo ok > "$SNAP.ok"
-  # alte Staende derselben Umgebung weg
-  for f in "$SNAPDIR/$NAME"-*.tar.zst; do
-    [ "$f" = "$SNAP" ] || rm -f "$f" "$f.ok"
-  done
-  say "gesichert: $SNAP ($(du -h "$SNAP" | cut -f1))"
+  snapshot
 else
   say "ohne Volume: setup laeuft auf jedem neuen Pod wieder"
 fi

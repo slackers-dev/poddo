@@ -105,7 +105,7 @@ Grossbuchstaben bereit (`$FOTOS`, `$NAME`). Dazu kommen:
 | `$JOB` | Job-Ordner, auch das Arbeitsverzeichnis von `run` |
 | `$POD_DO_ENV` | eingerichtete Umgebung (`/opt/pod-do/envs/<env>`) |
 | `$POD_DO_CACHE` | Ordner auf dem Volume, überlebt alles. Ohne Dateisperren, also nicht für Download-Caches |
-| `$HF_HOME` | lokal auf dem Pod (`/opt/pod-do/cache/huggingface`), wenn nicht anders gesetzt |
+| `$HF_HOME`, `$TORCH_HOME` | in `$POD_DO_ENV/.cache/`, damit Modelle aus dem Setup ins Archiv kommen |
 
 **Was ins Setup gehört:** alles, was lange dauert und sich selten ändert, auch Modelle. Es muss nach `$POD_DO_ENV`
 installieren (das ist auch das Arbeitsverzeichnis). Eine venv mit `uv venv` dort anlegen; pod-do setzt
