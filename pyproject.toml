@@ -1,0 +1,38 @@
+[project]
+name = "pod-do"
+version = "0.1.0"
+description = "Schwere Aufgaben vom Laptop auf eine RunPod-GPU abgeben: Pod starten, rechnen, Ergebnis holen, Pod weg."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = []
+
+[project.scripts]
+pod-do = "pod_do.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pod_do"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff.lint.per-file-ignores]
+# Shell-Skripte als Text: Zeilen so lassen, wie sie in bash gut lesbar sind
+"src/pod_do/pod_scripts.py" = ["E501"]
+
+[tool.ruff.format]
+line-ending = "lf"
