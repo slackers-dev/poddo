@@ -4,6 +4,17 @@ ROOT = "/opt/pod-do"
 
 # Umgebung fuer setup, boot und jede Aufgabe. Platzhalter werden in pod.py ersetzt.
 ENV_SH = r"""# von pod-do erzeugt
+# SSH-Sitzungen erben die ENV des Images nicht (PATH mit /usr/local/cuda/bin, CUDA_*, ...).
+# Darum die Umgebung des Hauptprozesses uebernehmen, ohne sitzungsbezogene und geheime Werte.
+if [ -r /proc/1/environ ]; then
+  while IFS= read -r -d '' kv; do
+    k="${kv%%=*}"
+    case "$k" in
+      HOME|PWD|OLDPWD|SHLVL|_|TERM|HOSTNAME|USER|LOGNAME|SHELL|PUBLIC_KEY|JUPYTER_PASSWORD|RUNPOD_API_KEY) continue ;;
+    esac
+    [[ "$k" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && export "$kv"
+  done < /proc/1/environ
+fi
 export POD_DO_ROOT=/opt/pod-do
 export POD_DO_ENV=/opt/pod-do/envs/@ENV@
 export POD_DO_VOLUME=@VOLUME@
