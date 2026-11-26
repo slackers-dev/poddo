@@ -44,6 +44,8 @@ class GlobalConfig:
     gpus: list[str] = field(default_factory=lambda: list(DEFAULT_GPUS))
     idle_minutes: int = 20
     wait_minutes: float = 10  # so lange auf eine freie GPU warten
+    registry_user: str = ""  # Benutzer fuer die Registry der Images (z. B. GitHub-Name bei ghcr.io)
+    runpod_registry: str = "pod-do"  # Name der Registry-Zugangsdaten bei RunPod (zum Ziehen privater Images)
     max_hours: float = 6.0
 
     @classmethod
@@ -55,7 +57,16 @@ class GlobalConfig:
         cfg = cls()
         if "ssh_key" in data:
             cfg.ssh_key = Path(data["ssh_key"]).expanduser()
-        for k in ("volume", "cloud", "gpus", "idle_minutes", "wait_minutes", "max_hours"):
+        for k in (
+            "volume",
+            "cloud",
+            "gpus",
+            "idle_minutes",
+            "wait_minutes",
+            "max_hours",
+            "registry_user",
+            "runpod_registry",
+        ):
             if k in data:
                 setattr(cfg, k, data[k])
         if cfg.ssh_key is None:
@@ -77,8 +88,8 @@ def find_ssh_key() -> Path | None:
 ENV_KEYS = ("RUNPOD_API_KEY", "POD_API_KEY")
 
 
-def dotenv_key(start: Path | None = None) -> str:
-    """Schluessel aus der naechsten .env (hier oder darueber), RUNPOD_API_KEY oder POD_API_KEY."""
+def dotenv_value(*names: str, start: Path | None = None) -> str:
+    """Wert aus der naechsten .env (hier oder darueber), erster der Namen, der gesetzt ist."""
     d = (start or Path.cwd()).resolve()
     for p in [d, *d.parents]:
         f = p / ".env"
@@ -89,11 +100,16 @@ def dotenv_key(start: Path | None = None) -> str:
             if line.startswith("export "):
                 line = line[7:].lstrip()
             name, sep, value = line.partition("=")
-            if sep and name.strip() in ENV_KEYS:
+            if sep and name.strip() in names:
                 value = value.strip().strip("'\"")
                 if value:
                     return value
     return ""
+
+
+def dotenv_key(start: Path | None = None) -> str:
+    """RunPod-Schluessel aus der naechsten .env: RUNPOD_API_KEY oder POD_API_KEY."""
+    return dotenv_value(*ENV_KEYS, start=start)
 
 
 def api_key() -> str:
@@ -150,6 +166,7 @@ def store_api_key_interactive() -> str:
 class EnvSpec:
     name: str
     image: str
+    docker: str = ""  # Repo fuer die fertige Umgebung als Image, z. B. ghcr.io/org/name (Tag = Setup-Hash)
     setup: str = ""  # laeuft einmal, Ergebnis ($POD_DO_ENV) wird als Archiv auf dem Volume gesichert
     boot: str = ""  # laeuft bei jedem Pod-Start (z. B. apt-get), wird nicht gesichert
     gpus: list[str] = field(default_factory=list)
@@ -206,6 +223,7 @@ class Project:
             envs[n] = EnvSpec(
                 name=n,
                 image=e["image"],
+                docker=str(e.get("docker", "")),
                 setup=_script(root, e, "setup"),
                 boot=_script(root, e, "boot"),
                 gpus=list(e.get("gpus", [])),

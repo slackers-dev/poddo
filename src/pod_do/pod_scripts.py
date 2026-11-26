@@ -44,6 +44,9 @@ SNAP="${SNAPDIR:+$SNAPDIR/$NAME-$HASH.tar.zst}"
 say() { printf '\n[pod-do] %s\n' "$*"; }
 snapshot() {
   [ -n "$SNAP" ] || return 0
+  # Umgebung kommt als Docker-Image (env.docker): kein Archiv auf dem Volume noetig
+  [ "@SNAPSHOT@" = 1 ] || return 0
+  [ -f "$ENVS/$NAME/.pod-do-image" ] && return 0
   [ -f "$SNAP.ok" ] && [ -f "$SNAP" ] && return 0
   say "Umgebung auf dem Volume sichern ($(du -sh "$ENVS/$NAME" | cut -f1), dauert etwas)"
   mkdir -p "$SNAPDIR"
@@ -182,4 +185,74 @@ if [ -f /opt/pod-do/watchdog.pid ] && kill -0 "$(cat /opt/pod-do/watchdog.pid)" 
 fi
 setsid nohup bash /opt/pod-do/watchdog.sh @IDLE@ @MAX@ >/dev/null 2>&1 < /dev/null &
 echo $! > /opt/pod-do/watchdog.pid
+"""
+
+CRANE_URL = "https://github.com/google/go-containerregistry/releases/download/v0.22.1/go-containerregistry_Linux_@ARCH@.tar.gz"
+
+# Werkzeuge fuer den Push: crane (Images ohne Docker-Daemon bauen) und pigz (paralleles gzip).
+IMAGE_TOOLS_SH = r"""
+set -eo pipefail
+source /opt/pod-do/env.sh
+command -v pigz >/dev/null || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq pigz >/dev/null; }
+case "$(uname -m)" in aarch64|arm64) ARCH=arm64 ;; *) ARCH=x86_64 ;; esac
+command -v crane >/dev/null || curl -LsSf "$(echo @CRANE_URL@ | sed "s/@ARCH@/$ARCH/")" | tar -xz -C /opt/pod-do/bin crane
+crane version
+""".replace("@CRANE_URL@", CRANE_URL)
+
+# Packt /opt/pod-do/envs/<env> in Layer von hoechstens etwa 4 GB und haengt sie an das Basis-Image.
+PUSH_SH = r"""#!/usr/bin/env bash
+set -eo pipefail
+source /opt/pod-do/env.sh
+NAME=@ENV@
+BASE=@BASE@
+TARGET=@TARGET@
+W=/opt/pod-do/image-layers
+say() { printf '\n[pod-do] %s\n' "$*"; }
+rm -rf "$W" && mkdir -p "$W"
+MARKER="/opt/pod-do/envs/$NAME/.pod-do-image"
+echo "$TARGET" > "$MARKER"
+# Geht etwas schief, gilt das Image nicht als hochgeladen
+trap 'rm -f "$MARKER"' ERR
+
+say "Umgebung in Layer aufteilen ($(du -sh "/opt/pod-do/envs/$NAME" | cut -f1))"
+python3 - "$NAME" "$W" <<'EOF'
+import os, sys
+name, out = sys.argv[1], sys.argv[2]
+root = f"/opt/pod-do/envs/{name}"
+LIMIT = 4 * 1024**3
+dirs, files = [], []
+for dp, dns, fns in os.walk(root):
+    dns.sort()
+    dirs.append(dp)
+    for n in sorted(fns) + [d for d in dns if os.path.islink(os.path.join(dp, d))]:
+        p = os.path.join(dp, n)
+        files.append((p, os.lstat(p).st_size))
+groups, cur, size = [list(dirs)], [], 0
+for p, n in files:
+    if cur and size + n > LIMIT:
+        groups.append(cur)
+        cur, size = [], 0
+    cur.append(p)
+    size += n
+if cur:
+    groups.append(cur)
+for i, g in enumerate(groups):
+    with open(f"{out}/layer{i:02d}.list", "w") as f:
+        f.write("\n".join(p.lstrip("/") for p in g) + "\n")
+print(f"{len(groups)} Layer")
+EOF
+
+say "Layer packen (pigz)"
+args=()
+for list in "$W"/layer*.list; do
+  tar -C / --no-recursion -T "$list" -cf - | pigz -1 > "${list%.list}.tar.gz"
+  args+=(--new_layer "${list%.list}.tar.gz")
+  echo "$(basename "${list%.list}"): $(du -h "${list%.list}.tar.gz" | cut -f1)"
+done
+
+say "Image bauen und hochladen: $TARGET"
+# POD_DO_CRANE_FLAGS z. B. --insecure fuer eine lokale Test-Registry ohne HTTPS
+crane append $POD_DO_CRANE_FLAGS --base "$BASE" --new_tag "$TARGET" "${args[@]}"
+rm -rf "$W"
+say "fertig: $TARGET ($(crane digest $POD_DO_CRANE_FLAGS "$TARGET"))"
 """

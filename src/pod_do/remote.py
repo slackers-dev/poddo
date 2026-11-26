@@ -42,11 +42,21 @@ class Remote:
         return a
 
     def run(
-        self, script: str, *, check: bool = True, capture: bool = False, tty: bool = False, stdin=None
+        self,
+        script: str,
+        *,
+        check: bool = True,
+        capture: bool = False,
+        tty: bool = False,
+        stdin=None,
+        stdin_text: str | None = None,
     ) -> subprocess.CompletedProcess:
-        """Fuehrt `script` mit bash -lc auf dem Pod aus."""
+        """Fuehrt `script` mit bash -lc auf dem Pod aus. stdin_text geht als Eingabe mit (z. B. ein Token)."""
         cmd = self.base_args(tty=tty) + ["bash -lc " + shlex.quote(script)]
-        r = subprocess.run(cmd, text=capture, capture_output=capture, stdin=stdin)
+        if stdin_text is not None:
+            r = subprocess.run(cmd, input=stdin_text, text=True, capture_output=capture)
+        else:
+            r = subprocess.run(cmd, text=capture, capture_output=capture, stdin=stdin)
         if check and r.returncode != 0:
             err = (r.stderr or "").strip() if capture else ""
             raise RemoteError(

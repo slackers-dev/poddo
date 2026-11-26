@@ -6,7 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import __version__
+from . import __version__, registry
 from .api import ApiError, RunPod
 from .config import (
     PROJECT_FILE,
@@ -15,9 +15,10 @@ from .config import (
     GlobalConfig,
     Project,
     api_key,
+    config_dir,
     store_api_key_interactive,
 )
-from .pod import Pods, gpu_candidates, say
+from .pod import Pods, gpu_candidates, image_ref, say
 from .remote import RemoteError
 from .task import Runner
 
@@ -186,6 +187,51 @@ def cmd_check(a) -> int:
     return 0
 
 
+def _set_config(key: str, value: str) -> None:
+    """Eine Zeile `key = "value"` in ~/.config/pod-do/config.toml setzen."""
+    f = config_dir() / "config.toml"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    lines = f.read_text().splitlines() if f.exists() else []
+    lines = [ln for ln in lines if not ln.split("=")[0].strip() == key]
+    lines.append(f'{key} = "{value}"')
+    f.write_text("\n".join(lines) + "\n")
+
+
+def cmd_registry(a) -> int:
+    cfg = GlobalConfig.load()
+    if a.action == "login":
+        if a.user:
+            _set_config("registry_user", a.user)
+        where = registry.store_token_interactive(a.host)
+        print(f"Token gespeichert in {where}" + (f", Benutzer {a.user}" if a.user else ""))
+        return 0
+    # runpod: dieselben Zugangsdaten bei RunPod hinterlegen, damit Pods das private Image ziehen koennen
+    user = a.user or cfg.registry_user
+    if not user:
+        raise ConfigError("Benutzer fehlt: --user <name> oder registry_user in der Konfig")
+    api = RunPod(api_key())
+    name = cfg.runpod_registry
+    if any(r.get("name") == name for r in api.registries()):
+        print(f"Registry-Zugangsdaten {name!r} gibt es bei RunPod schon.")
+        return 0
+    reg = api.create_registry(name, user, registry.token(a.host))
+    print(f"Registry-Zugangsdaten {name!r} bei RunPod angelegt ({reg.get('id')})")
+    return 0
+
+
+def cmd_image(a) -> int:
+    cfg, api, project = _ctx()
+    env = _env_arg(project, a.env)
+    target = image_ref(project.envs[env])
+    if not target:
+        raise ConfigError(f'env.{env} hat kein docker = "<registry>/<repo>" in pod-do.toml')
+    pods = Pods(api, cfg, project)
+    if not a.check:
+        pods.ensure(env, a.gpu, a.wait)
+    print(f"{target}: {'vorhanden' if pods.image_exists(target) else 'fehlt'}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="pod-do", description=__doc__)
     p.add_argument("--version", action="version", version=f"pod-do {__version__}")
@@ -237,6 +283,21 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("env", nargs="?")
     s.add_argument("--all", action="store_true", help="alle pod-do-Pods, egal welches Projekt")
     s.set_defaults(fn=cmd_down)
+
+    s = sub.add_parser("registry", help="Zugang zur Registry fuer Docker-Images")
+    s.add_argument(
+        "action", choices=["login", "runpod"], help="login: Token lokal ablegen, runpod: bei RunPod"
+    )
+    s.add_argument("host", nargs="?", default="ghcr.io")
+    s.add_argument("--user", help="Benutzer der Registry (bei ghcr.io der GitHub-Name)")
+    s.set_defaults(fn=cmd_registry)
+
+    s = sub.add_parser("image", help="Umgebung als Docker-Image bauen und hochladen (env.docker)")
+    s.add_argument("env", nargs="?")
+    s.add_argument("--check", action="store_true", help="nur pruefen, ob es das Image schon gibt")
+    s.add_argument("--gpu", action="append", help="GPU-ID, mehrfach fuer Ausweichkarten")
+    s.add_argument("--wait", type=float, metavar="MIN", help="so lange auf eine freie GPU warten")
+    s.set_defaults(fn=cmd_image)
 
     s = sub.add_parser("volume", help="Global Volume anzeigen oder anlegen")
     s.add_argument("--create", action="store_true")

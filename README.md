@@ -26,6 +26,8 @@ pod-do down                                # Pod sofort weg (sonst nach 20 min L
   Pod weiter. `pod-do attach` hängt sich wieder an und holt das Ergebnis.
 - **Wächter gegen vergessene Pods.** Der Pod löscht sich nach `idle_minutes` ohne Job und ohne SSH-Sitzung
   selbst, spätestens nach `max_hours`.
+- **Optional als Docker-Image.** Die fertige Umgebung kann auch als Image in einer Registry liegen,
+  gebaut direkt auf dem Pod (siehe unten).
 - **Nur Standardbibliothek.** Python ab 3.11, ssh und tar. Spricht die RunPod REST API v2.
 
 ## Einrichten (einmal pro Rechner)
@@ -116,6 +118,39 @@ funktioniert. `uv` ist auf dem Pod schon da. Systempakete (apt) gehören in `boo
 **Neu einrichten:** Ändert sich `image` oder `setup`, richtet pod-do automatisch neu ein und ersetzt das
 Archiv. Achtung: Dazu zählt jede Änderung am Setup-Skript, auch an Kommentaren.
 
+## Umgebung als Docker-Image (optional)
+
+Statt als Archiv auf dem Volume kann die eingerichtete Umgebung als Docker-Image in einer Registry liegen
+(z. B. ghcr.io). Dann startet jeder neue Pod direkt aus dem fertigen Image: kein Setup, kein Archiv, kein
+Volume nötig, und das Image läuft auch anderswo.
+
+```toml
+[env.lhm]
+image = "runpod/pytorch:2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04"   # Basis
+docker = "ghcr.io/slackers-dev/splattwin-lhm"                       # fertige Umgebung, Tag = Setup-Hash
+```
+
+**So entsteht es:** Gibt es `<docker>:<setup-hash>` noch nicht, richtet pod-do den Pod wie gewohnt ein
+(Archiv vom Volume oder Setup). Danach packt der Pod `/opt/pod-do/envs/<env>` in Layer von etwa 4 GB
+(`pigz`) und hängt sie mit [crane](https://github.com/google/go-containerregistry) an das Basis-Image,
+ohne Docker-Daemon (der fehlt in RunPod-Pods). Ändert sich `image` oder `setup`, gibt es einen neuen Tag.
+Von Hand: `pod-do image <env>`, nur prüfen: `pod-do image <env> --check`.
+
+**Einmal einrichten (Beispiel ghcr.io):**
+
+1. Auf GitHub einen Token (classic) mit nur `write:packages` und `read:packages` anlegen.
+2. `pod-do registry login ghcr.io --user <github-name>`: Token in den Schlüsselbund, Benutzer in die Konfig.
+   Alternativ `POD_DO_REGISTRY_TOKEN` in der Umgebung oder in `.env`.
+3. `pod-do registry runpod`: dieselben Zugangsdaten bei RunPod hinterlegen (Name `pod-do`, änderbar mit
+   `runpod_registry`), damit Pods das private Image ziehen können. Braucht einen API-Schlüssel mit dem Recht
+   «Secrets». Oder in der RunPod-Konsole unter *Settings → Container Registry Auth* von Hand.
+
+Der Token geht beim Hochladen nur über SSH-stdin an den Pod, er steht nie in dessen Umgebung. Fehlt der
+Zugang, arbeitet pod-do mit einem Hinweis wie ohne `docker` weiter.
+
+**Was nicht ins Image kommt:** Systempakete aus `boot` (die laufen weiter bei jedem Start) und alles
+ausserhalb von `$POD_DO_ENV`. Images mit Modellen, die nur für Forschung freigegeben sind, privat halten.
+
 ## Befehle
 
 | Befehl | Was |
@@ -129,6 +164,8 @@ Archiv. Achtung: Dazu zählt jede Änderung am Setup-Skript, auch an Kommentaren
 | `pod-do gpus [--min-vram N]` | GPUs mit Preis und Verfügbarkeit, die IDs für `gpus = [...]` |
 | `pod-do check` | Konfiguration und GPU-Wahl prüfen, ohne etwas zu starten |
 | `pod-do volume [--create]` | Global Volume anzeigen oder anlegen |
+| `pod-do image [env] [--check]` | Umgebung als Docker-Image bauen und hochladen (`docker = ...`) |
+| `pod-do registry login\|runpod [host] [--user]` | Zugang zur Registry lokal oder bei RunPod hinterlegen |
 
 ## Kosten
 

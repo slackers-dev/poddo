@@ -281,3 +281,58 @@ def test_create_waits_for_gpu(tmp_path, monkeypatch):
         ).create(p.envs["main"])
     assert pods.create(p.envs["main"], wait_minutes=5)["id"] == "p2"
     assert sleeps == [30]
+
+
+def test_image_ref_parse():
+    from pod_do.registry import ImageRef
+
+    r = ImageRef.parse("ghcr.io/slackers-dev/splattwin-lhm:91ea1d25aa96")
+    assert (r.host, r.repo, r.tag) == ("ghcr.io", "slackers-dev/splattwin-lhm", "91ea1d25aa96")
+    r = ImageRef.parse("runpod/pytorch:2.2.0-py3.10")
+    assert (r.host, r.repo, r.tag) == ("registry-1.docker.io", "runpod/pytorch", "2.2.0-py3.10")
+    assert ImageRef.parse("ubuntu").repo == "library/ubuntu"
+    assert ImageRef.parse("localhost:5000/x/y:t").host == "localhost:5000"
+
+
+def test_image_exists_uses_bearer_token(monkeypatch):
+    from pod_do import registry
+
+    calls = []
+
+    def fake_get(url, headers, method="GET"):
+        calls.append((method, url, headers.get("Authorization", "")))
+        if "token" in url:
+            return 200, b'{"token": "abc"}', {}
+        if headers.get("Authorization") == "Bearer abc":
+            return (200 if url.endswith(":t1") or url.endswith("/t1") else 404), b"", {}
+        return 401, b"", {"WWW-Authenticate": 'Bearer realm="https://ghcr.io/token",service="ghcr.io"'}
+
+    monkeypatch.setattr(registry, "_get", fake_get)
+    ref = registry.ImageRef.parse("ghcr.io/org/img:t1")
+    assert registry.image_exists(ref, "u", "secret")
+    assert any(c[2].startswith("Basic ") for c in calls)  # Token-Abfrage mit Benutzer und Token
+    assert not registry.image_exists(registry.ImageRef.parse("ghcr.io/org/img:t2"), "u", "secret")
+
+
+def test_create_with_image_and_registry(tmp_path):
+    from pod_do.pod import image_ref
+
+    key = tmp_path / "k"
+    key.write_text("")
+    (tmp_path / "k.pub").write_text("ssh-ed25519 A")
+    fake = FakeApi(
+        {
+            ("GET", "/v2/catalog/gpus"): [(200, GPUS)],
+            ("GET", "/v2/global-volumes"): [(200, {"globalVolumes": [], "pagination": {}})],
+            ("POST", "/v2/pods"): [(201, {"id": "p3", "name": "x", "status": "PROVISIONING"})],
+        }
+    )
+    p = project(tmp_path, TEMPLATE.replace("min_vram = 8", 'min_vram = 8\ndocker = "ghcr.io/org/img"'))
+    env = p.envs["main"]
+    target = image_ref(env)
+    assert target == f"ghcr.io/org/img:{env_hash(env)}"
+    Pods(RunPod("k", transport=fake), GlobalConfig(ssh_key=key, gpus=["NVIDIA A40"]), p).create(
+        env, image=target, registry_id="reg1"
+    )
+    body = [c[2] for c in fake.calls if c[0] == "POST"][0]
+    assert body["image"] == target and body["registry"] == "reg1"

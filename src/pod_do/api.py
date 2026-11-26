@@ -136,6 +136,14 @@ class RunPod:
     def create_global_volume(self, name: str) -> dict:
         return self.request("POST", "/v2/global-volumes", {"name": name})
 
+    def registries(self) -> list[dict]:
+        return self._list("/v2/registries", "registries")
+
+    def create_registry(self, name: str, username: str, password: str) -> dict:
+        return self.request(
+            "POST", "/v2/registries", {"name": name, "username": username, "password": password}
+        )
+
     def balance(self) -> dict:
         return self.request("GET", "/v2/billing/balance")
 
