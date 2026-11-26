@@ -9,9 +9,9 @@ pod-do run lhm ~/Desktop/fotos-beniam      # Pod starten, Fotos hoch, rechnen, a
 pod-do down                                # Pod sofort weg (sonst nach 20 min Leerlauf)
 ```
 
-> **Stand 26.11.2026:** Der ganze Ablauf ist gegen einen lokalen Container mit SSH und eine nachgebaute API
-> getestet (Einrichten, Archiv auf dem Volume, Wiederherstellen, Hochladen, Rechnen, Holen, Wächter). Gegen
-> das echte RunPod noch nicht.
+> **Stand 26.11.2026:** auf RunPod getestet. Beispiel LHM++ (SplatTwin): Setup einmal etwa 25 Minuten,
+> Archiv 14 GB auf dem Volume. Danach dauert `pod-do run` auf einem frischen Pod von null bis zum
+> Ergebnis gut 5 Minuten (davon etwa 1 Minute rechnen) und kostet auf einer L4 rund 6 Rappen.
 
 ## Wie es funktioniert
 
