@@ -113,7 +113,7 @@ installieren (das ist auch das Arbeitsverzeichnis). Eine venv mit `uv venv` dort
 funktioniert. `uv` ist auf dem Pod schon da. Systempakete (apt) gehören in `boot`, die landen nicht im Archiv.
 
 **Neu einrichten:** Ändert sich `image` oder `setup`, richtet pod-do automatisch neu ein und ersetzt das
-Archiv.
+Archiv. Achtung: Dazu zählt jede Änderung am Setup-Skript, auch an Kommentaren.
 
 ## Befehle
 
