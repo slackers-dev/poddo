@@ -103,10 +103,10 @@ Grossbuchstaben bereit (`$FOTOS`, `$NAME`). Dazu kommen:
 |---|---|
 | `$JOB` | Job-Ordner, auch das Arbeitsverzeichnis von `run` |
 | `$POD_DO_ENV` | eingerichtete Umgebung (`/opt/pod-do/envs/<env>`) |
-| `$POD_DO_CACHE` | Ordner auf dem Volume für grosse, nur gelesene Dateien (z. B. Modelle), überlebt alles |
-| `$HF_HOME` | zeigt auf `$POD_DO_CACHE/huggingface`, wenn nicht anders gesetzt |
+| `$POD_DO_CACHE` | Ordner auf dem Volume, überlebt alles. Ohne Dateisperren, also nicht für Download-Caches |
+| `$HF_HOME` | lokal auf dem Pod (`/opt/pod-do/cache/huggingface`), wenn nicht anders gesetzt |
 
-**Was ins Setup gehört:** alles, was lange dauert und sich selten ändert. Es muss nach `$POD_DO_ENV`
+**Was ins Setup gehört:** alles, was lange dauert und sich selten ändert, auch Modelle. Es muss nach `$POD_DO_ENV`
 installieren (das ist auch das Arbeitsverzeichnis). Eine venv mit `uv venv` dort anlegen; pod-do setzt
 `UV_PYTHON_INSTALL_DIR`, damit auch Python selbst in `$POD_DO_ENV` liegt und das Archiv auf jedem Pod
 funktioniert. `uv` ist auf dem Pod schon da. Systempakete (apt) gehören in `boot`, die landen nicht im Archiv.

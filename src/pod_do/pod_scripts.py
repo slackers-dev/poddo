@@ -13,7 +13,8 @@ export PATH="/opt/pod-do/bin:$PATH"
 export UV_PYTHON_INSTALL_DIR="$POD_DO_ENV/.python"
 export UV_CACHE_DIR=/opt/pod-do/cache/uv
 export UV_LINK_MODE=copy
-export HF_HOME="${HF_HOME:-$POD_DO_CACHE/huggingface}"
+# HF_HOME bleibt lokal: Global Volumes koennen keine Dateien sperren, huggingface_hub braucht das
+export HF_HOME="${HF_HOME:-/opt/pod-do/cache/huggingface}"
 mkdir -p "$POD_DO_ENV" "$POD_DO_CACHE" "$UV_CACHE_DIR" 2>/dev/null || true
 @VARS@
 """
