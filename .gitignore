@@ -5,3 +5,7 @@ dist/
 .pytest_cache/
 .ruff_cache/
 results/
+.env
+.yappy/
+brag-output/
+.DS_Store

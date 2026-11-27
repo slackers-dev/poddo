@@ -1,4 +1,4 @@
-"""Einstellungen: global (~/.config/pod-do/config.toml, API-Schluessel) und pro Projekt (pod-do.toml)."""
+"""Einstellungen: global (~/.config/poddo/config.toml, API-Schluessel) und pro Projekt (poddo.toml)."""
 
 from __future__ import annotations
 
@@ -12,8 +12,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-PROJECT_FILE = "pod-do.toml"
-KEYCHAIN_SERVICE = "pod-do"
+PROJECT_FILE = "poddo.toml"
+# Frueherer Name des Tools (pod-do). Wird noch gelesen, damit alte Projekte, Pods und Volumes weiter gehen.
+LEGACY = "pod-do"
+KEYCHAIN_SERVICE = "poddo"
 KEYCHAIN_ACCOUNT = "runpod-api-key"
 
 # Kleine, guenstige Karten zuerst. Reicht fuer Inferenz und kleine Trainings.
@@ -41,26 +43,35 @@ def _check_name(path: Path, kind: str, name: str) -> None:
         raise ConfigError(f"{path}: {kind}.{name!r}: nur Buchstaben, Ziffern, _ . - erlaubt")
 
 
+def _dir(base: str) -> Path:
+    """Ordner unter `base`; einen alten pod-do-Ordner beim ersten Mal umbenennen."""
+    new, old = Path(base) / "poddo", Path(base) / LEGACY
+    if not new.exists() and old.is_dir():
+        try:
+            old.rename(new)
+        except OSError:
+            return old
+    return new
+
+
 def config_dir() -> Path:
-    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
-    return Path(base) / "pod-do"
+    return _dir(os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config"))
 
 
 def state_dir() -> Path:
-    base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
-    return Path(base) / "pod-do"
+    return _dir(os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state"))
 
 
 @dataclass
 class GlobalConfig:
     ssh_key: Path | None = None
-    volume: str = "pod-do"  # Name des Global Volume, "" = ohne Volume
+    volume: str = "poddo"  # Name des Global Volume, "" = ohne Volume
     cloud: str = "SECURE"
     gpus: list[str] = field(default_factory=lambda: list(DEFAULT_GPUS))
     idle_minutes: int = 20
     wait_minutes: float = 10  # so lange auf eine freie GPU warten
     registry_user: str = ""  # Benutzer fuer die Registry der Images (z. B. GitHub-Name bei ghcr.io)
-    runpod_registry: str = "pod-do"  # Name der Registry-Zugangsdaten bei RunPod (zum Ziehen privater Images)
+    runpod_registry: str = "poddo"  # Name der Registry-Zugangsdaten bei RunPod (zum Ziehen privater Images)
     max_hours: float = 6.0
     # Fertiger Job, Ergebnisse noch nicht abgeholt: so lange wartet der Waechter, bevor er den Pod loescht
     keep_results_minutes: int = 60
@@ -134,7 +145,7 @@ def dotenv_key(start: Path | None = None) -> str:
 
 
 def api_key() -> str:
-    """Umgebungsvariable, sonst .env, sonst macOS-Schluesselbund, sonst ~/.config/pod-do/api_key."""
+    """Umgebungsvariable, sonst .env, sonst macOS-Schluesselbund, sonst ~/.config/poddo/api_key."""
     for name in ENV_KEYS:
         key = os.environ.get(name, "").strip()
         if key:
@@ -143,17 +154,18 @@ def api_key() -> str:
     if key:
         return key
     if sys.platform == "darwin" and shutil.which("security"):
-        r = subprocess.run(
-            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", KEYCHAIN_ACCOUNT, "-w"],
-            capture_output=True,
-            text=True,
-        )
-        if r.returncode == 0 and r.stdout.strip():
-            return r.stdout.strip()
+        for service in (KEYCHAIN_SERVICE, LEGACY):
+            r = subprocess.run(
+                ["security", "find-generic-password", "-s", service, "-a", KEYCHAIN_ACCOUNT, "-w"],
+                capture_output=True,
+                text=True,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
     f = config_dir() / "api_key"
     if f.exists():
         return f.read_text().strip()
-    raise ConfigError("Kein RunPod-API-Schluessel. Einrichten mit: pod-do login")
+    raise ConfigError("Kein RunPod-API-Schluessel. Einrichten mit: poddo login")
 
 
 def store_api_key_interactive() -> str:
@@ -168,7 +180,7 @@ def store_api_key_interactive() -> str:
             ["security", "add-generic-password", "-U", "-s", KEYCHAIN_SERVICE, "-a", KEYCHAIN_ACCOUNT, "-w"],
             check=True,
         )
-        return "macOS-Schluesselbund (Eintrag pod-do)"
+        return "macOS-Schluesselbund (Eintrag poddo)"
     key = getpass.getpass("RunPod-API-Schluessel (wird nicht angezeigt): ").strip()
     if not key:
         raise ConfigError("leer, nichts gespeichert")
@@ -188,7 +200,7 @@ class EnvSpec:
     name: str
     image: str
     docker: str = ""  # Repo fuer die fertige Umgebung als Image, z. B. ghcr.io/org/name (Tag = Setup-Hash)
-    setup: str = ""  # laeuft einmal, Ergebnis ($POD_DO_ENV) wird als Archiv auf dem Volume gesichert
+    setup: str = ""  # laeuft einmal, Ergebnis ($PODDO_ENV) wird als Archiv auf dem Volume gesichert
     boot: str = ""  # laeuft bei jedem Pod-Start (z. B. apt-get), wird nicht gesichert
     gpus: list[str] = field(default_factory=list)
     min_vram: int = 0
@@ -225,9 +237,10 @@ class Project:
     def find(cls, start: Path | None = None) -> Project:
         d = (start or Path.cwd()).resolve()
         for p in [d, *d.parents]:
-            if (p / PROJECT_FILE).exists():
-                return cls.load(p / PROJECT_FILE)
-        raise ConfigError(f"Kein {PROJECT_FILE} gefunden (hier oder darueber). Anlegen mit: pod-do init")
+            for name in (PROJECT_FILE, f"{LEGACY}.toml"):
+                if (p / name).exists():
+                    return cls.load(p / name)
+        raise ConfigError(f"Kein {PROJECT_FILE} gefunden (hier oder darueber). Anlegen mit: poddo init")
 
     @classmethod
     def load(cls, path: Path) -> Project:
@@ -295,29 +308,29 @@ def _script(root: Path, table: dict, key: str) -> str:
 
 
 TEMPLATE = """\
-# pod-do: schwere Aufgaben auf einer RunPod-GPU rechnen. Doku: https://github.com/slackers-dev/pod-do
+# poddo: schwere Aufgaben auf einer RunPod-GPU rechnen. Doku: https://github.com/slackers-dev/pod-do
 
-# Eine Umgebung = Docker-Image + einmaliges Setup. Was setup nach $POD_DO_ENV installiert, sichert
-# pod-do als Archiv auf dem Volume. Beim naechsten Pod ist es in ein, zwei Minuten wieder da.
+# Eine Umgebung = Docker-Image + einmaliges Setup. Was setup nach $PODDO_ENV installiert, sichert
+# poddo als Archiv auf dem Volume. Beim naechsten Pod ist es in ein, zwei Minuten wieder da.
 [env.main]
 image = "runpod/pytorch:2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04"
 min_vram = 8          # GB, filtert die GPU-Liste
 # gpus = ["NVIDIA RTX A4500", "NVIDIA A40"]   # eigene Reihenfolge, sonst die globale
 boot = "apt-get update -qq && apt-get install -y -qq ffmpeg"
 setup = '''
-cd "$POD_DO_ENV"
+cd "$PODDO_ENV"
 uv venv --python 3.10 .venv
 uv pip install --python .venv/bin/python numpy
 '''
 
-# Eine Aufgabe: hochladen, rechnen, herunterladen. {name} sind Argumente von `pod-do run`.
+# Eine Aufgabe: hochladen, rechnen, herunterladen. {name} sind Argumente von `poddo run`.
 [task.hello]
 env = "main"
 args = ["input", "name?"]
 defaults = { name = "{input.stem}" }
 upload = { "in" = "{input}" }                # Job-Ordner/in  <-  lokaler Pfad
 run = '''
-source "$POD_DO_ENV/.venv/bin/activate"
+source "$PODDO_ENV/.venv/bin/activate"
 mkdir -p out
 python -c "import numpy; print('numpy', numpy.__version__)" | tee out/info.txt
 ls -la in >> out/info.txt

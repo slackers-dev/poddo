@@ -1,7 +1,7 @@
 """SSH und Dateitransfer zum Pod. Nur ssh und tar, beides ist auf Mac und Pod vorhanden.
 
 Alle Befehle an einen Pod laufen ueber eine einzige SSH-Verbindung (ControlMaster). Ein neuer
-Handshake zu einem Pod in einem anderen Rechenzentrum kostet gut eine Sekunde, und ein `pod-do run`
+Handshake zu einem Pod in einem anderen Rechenzentrum kostet gut eine Sekunde, und ein `poddo run`
 braucht sonst zwanzig davon.
 """
 
@@ -29,9 +29,10 @@ class RemoteError(Exception):
 
 
 class Remote:
-    def __init__(self, ssh: Ssh, key: Path | None, state: Path | None = None):
+    def __init__(self, ssh: Ssh, key: Path | None, state: Path | None = None, prelude: str = ""):
         self.ssh = ssh
         self.key = key
+        self.prelude = prelude  # laeuft vor jedem run() und put_files()
         self._state = state or state_dir()
         self._master_tried = False
         self._mux: Path | None = None
@@ -62,7 +63,7 @@ class Remote:
             known.parent.mkdir(parents=True, exist_ok=True)
             a += [
                 "-o",
-                f"HostKeyAlias=pod-do-{self.ssh.pod_id}",
+                f"HostKeyAlias=poddo-{self.ssh.pod_id}",
                 "-o",
                 "StrictHostKeyChecking=accept-new",
                 "-o",
@@ -114,7 +115,7 @@ class Remote:
             pass
 
     def close(self) -> None:
-        """Gemeinsame Verbindung beenden (z. B. nach pod-do down)."""
+        """Gemeinsame Verbindung beenden (z. B. nach poddo down)."""
         if self._mux and self._mux.exists():
             subprocess.run(
                 ["ssh", *self._opts(), "-O", "exit", f"{self.ssh.user}@{self.ssh.host}"],
@@ -136,6 +137,8 @@ class Remote:
         stdin_text: str | None = None,
     ) -> subprocess.CompletedProcess:
         """Fuehrt `script` mit bash -lc auf dem Pod aus. stdin_text geht als Eingabe mit (z. B. ein Token)."""
+        if self.prelude:
+            script = f"{self.prelude}\n{script}"
         cmd = self.base_args(tty=tty) + ["bash -lc " + shlex.quote(script)]
         if stdin_text is not None:
             r = subprocess.run(cmd, input=stdin_text, text=True, capture_output=capture)
@@ -181,6 +184,8 @@ class Remote:
                 info.size, info.mode, info.mtime = len(data), mode, now
                 tar.addfile(info, io.BytesIO(data))
         script = "tar -C / -xf - --no-same-owner"
+        if self.prelude:
+            script = f"{self.prelude}\n{script}"
         if then:
             script += " && " + then
         r = subprocess.run(self.base_args() + ["bash -c " + shlex.quote(script)], input=buf.getvalue())

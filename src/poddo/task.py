@@ -15,7 +15,7 @@ from pathlib import Path
 from . import pod_scripts as S
 from .api import ApiError
 from .config import ConfigError, Project, TaskSpec, state_dir
-from .pod import ALIVE, Pods, results_archive, say
+from .pod import ALIVE, LEGACY_RESULTS, Pods, results_archive, say
 from .remote import Remote, RemoteError
 
 
@@ -25,7 +25,7 @@ def resolve_args(task: TaskSpec, given: list[str], cwd: Path) -> dict[str, str]:
     required = [a for a in task.args if not a.endswith("?")]
     if len(given) < len(required) or len(given) > len(names):
         usage = " ".join(f"[{a[:-1]}]" if a.endswith("?") else f"<{a}>" for a in task.args)
-        raise ConfigError(f"pod-do run {task.name} {usage}")
+        raise ConfigError(f"poddo run {task.name} {usage}")
     values: dict[str, str] = {}
     for n, v in zip(names, given, strict=False):
         p = (cwd / v).expanduser()
@@ -73,7 +73,7 @@ class JobStatus:
     started: int | None = None
     finished: int | None = None
     fetched: bool = False
-    progress: str = ""  # von pod-do-progress: "<erledigt> <total> [text]"
+    progress: str = ""  # von poddo-progress: "<erledigt> <total> [text]"
     last: str = ""  # letzte Zeile im Log
     saved: bool = False  # Ergebnisse auf dem Global Volume gesichert
     now: int = 0  # Uhr des Pods
@@ -114,7 +114,7 @@ TQDM = re.compile(r"(\d{1,3})%\|")
 
 
 def progress_of(st: JobStatus) -> tuple[float | None, str]:
-    """Anteil 0..1 (oder None) und Text: aus pod-do-progress, sonst aus einer tqdm-Zeile im Log."""
+    """Anteil 0..1 (oder None) und Text: aus poddo-progress, sonst aus einer tqdm-Zeile im Log."""
     parts = st.progress.split(" ", 2)
     if len(parts) >= 2 and parts[0].replace(".", "", 1).isdigit() and parts[1].replace(".", "", 1).isdigit():
         done, total = float(parts[0]), float(parts[1])
@@ -140,14 +140,14 @@ def duration(seconds: int) -> str:
 
 
 def describe(st: JobStatus, keep_minutes: int, volume: bool = False) -> str:
-    """Eine Zeile fuer pod-do jobs."""
+    """Eine Zeile fuer poddo jobs."""
     if st.fetched:
         if st.state != "done":
             return "abgeholt"
     if st.state == "lost" or (st.state == "gone" and not volume):
         return "weg: Pod geloescht, Ergebnisse NICHT abgeholt (verloren)"
     if st.state == "gone":
-        return f"Pod geloescht, Ergebnisse auf dem Volume (wenn der Job fertig wurde): pod-do attach {st.job}"
+        return f"Pod geloescht, Ergebnisse auf dem Volume (wenn der Job fertig wurde): poddo attach {st.job}"
     if st.state == "missing":
         return "unbekannt (gibt es auf dem Pod nicht)"
     if st.state == "saving":
@@ -168,12 +168,12 @@ def describe(st: JobStatus, keep_minutes: int, volume: bool = False) -> str:
     if st.fetched:
         return head + ", abgeholt"
     if st.saved:
-        return f"{head}, NICHT abgeholt, auf dem Volume gesichert: pod-do attach {st.job}"
+        return f"{head}, NICHT abgeholt, auf dem Volume gesichert: poddo attach {st.job}"
     left = ""
     if st.finished and st.now:
         mins = keep_minutes - (st.now - st.finished) // 60
         left = f" (Pod loescht sich in etwa {max(mins, 0)} min)"
-    return f"{head}, NICHT abgeholt, nur auf dem Pod{left}: pod-do attach {st.job}"
+    return f"{head}, NICHT abgeholt, nur auf dem Pod{left}: poddo attach {st.job}"
 
 
 def results_warning(job: str, keep_minutes: int, volume: bool = False) -> None:
@@ -182,14 +182,14 @@ def results_warning(job: str, keep_minutes: int, volume: bool = False) -> None:
         lines = [
             f"Job {job} laeuft auf dem Pod weiter.",
             "Am Ende sichert der Pod die Ergebnisse auf dem Global Volume: sie ueberleben den Pod.",
-            f"Holen:  pod-do attach {job}      Stand:  pod-do jobs",
+            f"Holen:  poddo attach {job}      Stand:  poddo jobs",
             "(Ist der Pod dann schon weg, startet attach kurz einen, etwa 1 Rappen.)",
         ]
     else:
         lines = [
             f"Job {job} laeuft auf dem Pod weiter. Die Ergebnisse liegen NUR dort.",
             f"Nach dem Ende wartet der Pod etwa {keep_minutes} min, dann loescht er sich samt Ergebnissen.",
-            f"Holen:  pod-do attach {job}      Stand:  pod-do jobs",
+            f"Holen:  poddo attach {job}      Stand:  poddo jobs",
         ]
     w = max(len(x) for x in lines)
     print("\n+" + "-" * (w + 2) + "+", file=sys.stderr)
@@ -241,7 +241,7 @@ class Runner:
         task = self.project.tasks.get(task_name)
         if not task:
             raise ConfigError(
-                f"Aufgabe {task_name!r} fehlt in pod-do.toml (da: {', '.join(self.project.tasks)})"
+                f"Aufgabe {task_name!r} fehlt in poddo.toml (da: {', '.join(self.project.tasks)})"
             )
         values = resolve_args(task, args, Path.cwd())
         local_hook(task.before, values, self.project.root, "before")
@@ -276,13 +276,13 @@ class Runner:
             raise
         say(f"fertig nach {int(time.time() - t0)} s, Code {code}")
         self.fetch(r, task, values, jobdir, job)
-        notify_local("pod-do", f"{job}: fertig, Code {code}, Ergebnisse geholt")
+        notify_local("poddo", f"{job}: fertig, Code {code}, Ergebnisse geholt")
         if code == 0:
             local_hook(task.after, values, self.project.root, "after")
         if down if down is not None else task.down:
             self.pods.down(pod)
         else:
-            say("Pod laeuft weiter (Waechter loescht ihn bei Leerlauf). Sofort weg: pod-do down")
+            say("Pod laeuft weiter (Waechter loescht ihn bei Leerlauf). Sofort weg: poddo down")
         return code
 
     def fetch(self, r: Remote, task: TaskSpec, values: dict[str, str], jobdir: str, job: str) -> None:
@@ -298,28 +298,39 @@ class Runner:
         # dem Volume braucht es nicht mehr (download wirft bei einem Fehler, hier ist alles angekommen).
         cleanup = f"touch {shlex.quote(jobdir)}/fetched"
         if self.volume:
-            arch = shlex.quote(results_archive(self.project.name, job))
-            cleanup += f"; rm -f {arch}.ok {arch}"
+            for arch in self._archives(job):
+                cleanup += f"; rm -f {shlex.quote(arch)}.ok {shlex.quote(arch)}"
         r.run(cleanup, check=False)
         self._update(job, fetched=True)
 
     # -- Ergebnisse vom Volume ----------------------------------------------------------------------
 
+    def _archives(self, job: str) -> list[str]:
+        """Archiv auf dem Volume, dazu der Ort aus der Zeit vor der Umbenennung (pod-do)."""
+        return [
+            results_archive(self.project.name, job),
+            results_archive(self.project.name, job, LEGACY_RESULTS),
+        ]
+
     def _restore(self, r: Remote, job: str) -> int | None:
         """Gesicherte Ergebnisse vom Volume in den Job-Ordner auf diesem Pod. Exit-Code des Jobs, oder
         None, wenn auf dem Volume nichts liegt."""
-        src = shlex.quote(results_archive(self.project.name, job))
         jobdir = shlex.quote(f"{S.ROOT}/jobs/{job}")
-        res = r.run(
-            f"bash -c {shlex.quote(S.RESTORE_RESULTS_SH)} restore {src} {jobdir} && cat {jobdir}/exitcode",
-            check=False,
-            capture=True,
-        )
-        if res.returncode == 3:
-            return None
-        if res.returncode != 0:
-            raise RemoteError(f"Ergebnisse von {job} vom Volume holen fehlgeschlagen: {res.stderr.strip()}")
-        return _int(res.stdout.strip().splitlines()[-1] if res.stdout.strip() else "")
+        for arch in self._archives(job):
+            res = r.run(
+                f"bash -c {shlex.quote(S.RESTORE_RESULTS_SH)} restore {shlex.quote(arch)} {jobdir}"
+                f" && cat {jobdir}/exitcode",
+                check=False,
+                capture=True,
+            )
+            if res.returncode == 3:
+                continue
+            if res.returncode != 0:
+                raise RemoteError(
+                    f"Ergebnisse von {job} vom Volume holen fehlgeschlagen: {res.stderr.strip()}"
+                )
+            return _int(res.stdout.strip().splitlines()[-1] if res.stdout.strip() else "")
+        return None
 
     def collect(self, r: Remote, current_pod: str) -> None:
         """Nicht abgeholte Ergebnisse frueherer Jobs (anderer Pods) vom Volume holen, nebenbei und gratis."""
@@ -334,7 +345,7 @@ class Runner:
                 continue
             say(f"Ergebnisse von {st['job']} (Code {code}) lagen noch auf dem Volume, hole sie")
             self.fetch(r, task, st["values"], f"{S.ROOT}/jobs/{st['job']}", st["job"])
-            notify_local("pod-do", f"{st['job']}: Ergebnisse vom Volume geholt")
+            notify_local("poddo", f"{st['job']}: Ergebnisse vom Volume geholt")
 
     def _from_volume(self, st: dict, task: TaskSpec) -> int:
         """Der Pod des Jobs ist weg: Ergebnisse ueber einen anderen Pod vom Volume holen."""
@@ -361,7 +372,7 @@ class Runner:
         finally:
             if created:
                 self.pods.down(created)
-        notify_local("pod-do", f"{st['job']}: Ergebnisse vom Volume geholt")
+        notify_local("poddo", f"{st['job']}: Ergebnisse vom Volume geholt")
         return code if code is not None else 1
 
     # -- Wieder anhaengen, Log, Stand ---------------------------------------------------------------
@@ -383,7 +394,7 @@ class Runner:
         st = self._load(job)
         task = self.project.tasks.get(st["task"])
         if not task:
-            raise ConfigError(f"Aufgabe {st['task']!r} gibt es nicht mehr in pod-do.toml")
+            raise ConfigError(f"Aufgabe {st['task']!r} gibt es nicht mehr in poddo.toml")
         try:
             _, r = self._pod_remote(st)
         except PodGone as e:
@@ -399,7 +410,7 @@ class Runner:
             results_warning(st["job"], self.keep_minutes, self.volume)
             raise
         self.fetch(r, task, st["values"], f"{S.ROOT}/jobs/{st['job']}", st["job"])
-        notify_local("pod-do", f"{st['job']}: fertig, Code {code}, Ergebnisse geholt")
+        notify_local("poddo", f"{st['job']}: fertig, Code {code}, Ergebnisse geholt")
         return code
 
     def logs(self, job: str | None, follow: bool = False, lines: int = 40) -> int:
@@ -407,7 +418,7 @@ class Runner:
         try:
             _, r = self._pod_remote(st)
         except PodGone as e:
-            hint = " Das Log liegt mit den Ergebnissen auf dem Volume: pod-do attach." if self.volume else ""
+            hint = " Das Log liegt mit den Ergebnissen auf dem Volume: poddo attach." if self.volume else ""
             raise ConfigError(f"{e}{hint}") from e
         d = shlex.quote(f"{S.ROOT}/jobs/{st['job']}")
         n = int(lines)

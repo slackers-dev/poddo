@@ -15,8 +15,8 @@ from dataclasses import dataclass
 
 from .config import ConfigError, dotenv_value
 
-KEYCHAIN_SERVICE = "pod-do-registry"
-ENV_TOKEN = "POD_DO_REGISTRY_TOKEN"
+KEYCHAIN_SERVICE = "poddo-registry"
+ENV_TOKEN = "PODDO_REGISTRY_TOKEN"
 MANIFEST_TYPES = ", ".join(
     [
         "application/vnd.oci.image.index.v1+json",
@@ -46,19 +46,21 @@ class ImageRef:
 
 
 def token(host: str) -> str:
-    """Zugang zur Registry: POD_DO_REGISTRY_TOKEN (Umgebung oder .env), sonst macOS-Schluesselbund."""
-    value = os.environ.get(ENV_TOKEN, "").strip() or dotenv_value(ENV_TOKEN)
-    if value:
-        return value
+    """Zugang zur Registry: PODDO_REGISTRY_TOKEN (Umgebung oder .env), sonst macOS-Schluesselbund."""
+    for name in (ENV_TOKEN, "POD_DO_REGISTRY_TOKEN"):  # zweiter: alter Name vor der Umbenennung
+        value = os.environ.get(name, "").strip() or dotenv_value(name)
+        if value:
+            return value
     if sys.platform == "darwin" and shutil.which("security"):
-        r = subprocess.run(
-            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", host, "-w"],
-            capture_output=True,
-            text=True,
-        )
-        if r.returncode == 0 and r.stdout.strip():
-            return r.stdout.strip()
-    raise ConfigError(f"Kein Zugang fuer {host}. Einrichten mit: pod-do registry login {host} --user <name>")
+        for service in (KEYCHAIN_SERVICE, "pod-do-registry"):
+            r = subprocess.run(
+                ["security", "find-generic-password", "-s", service, "-a", host, "-w"],
+                capture_output=True,
+                text=True,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
+    raise ConfigError(f"Kein Zugang fuer {host}. Einrichten mit: poddo registry login {host} --user <name>")
 
 
 def store_token_interactive(host: str) -> str:
@@ -72,7 +74,7 @@ def store_token_interactive(host: str) -> str:
 
 
 def _get(url: str, headers: dict[str, str], method: str = "GET") -> tuple[int, bytes, dict[str, str]]:
-    req = urllib.request.Request(url, headers={"User-Agent": "pod-do/0.1", **headers}, method=method)
+    req = urllib.request.Request(url, headers={"User-Agent": "poddo/0.1", **headers}, method=method)
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
             return r.status, r.read(), dict(r.headers)

@@ -4,11 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from pod_do import cli
-from pod_do.api import ApiError, RunPod, ssh_of
-from pod_do.config import TEMPLATE, ConfigError, GlobalConfig, Project
-from pod_do.pod import Pods, env_hash, gpu_candidates, pod_name
-from pod_do.task import fmt, resolve_args
+from poddo import cli
+from poddo.api import ApiError, RunPod, ssh_of
+from poddo.config import TEMPLATE, ConfigError, GlobalConfig, Project
+from poddo.pod import Pods, env_hash, gpu_candidates, pod_name
+from poddo.task import fmt, resolve_args
 
 GPUS = {
     "gpus": [
@@ -58,7 +58,7 @@ class FakeApi:
 
 
 def project(tmp_path: Path, text: str = TEMPLATE) -> Project:
-    (tmp_path / "pod-do.toml").write_text(text)
+    (tmp_path / "poddo.toml").write_text(text)
     return Project.find(tmp_path)
 
 
@@ -104,7 +104,7 @@ def test_resolve_args(tmp_path):
 
 
 def test_pod_name_and_hash(tmp_path):
-    assert pod_name("Mein Projekt", "main") == "pod-do-mein-projekt-main"
+    assert pod_name("Mein Projekt", "main") == "poddo-mein-projekt-main"
     p = project(tmp_path)
     h = env_hash(p.envs["main"])
     p.envs["main"].boot = "anders"  # boot zaehlt nicht
@@ -161,7 +161,7 @@ def test_create_falls_back_to_next_gpu(tmp_path):
                 (
                     200,
                     {
-                        "globalVolumes": [{"id": "gv1", "name": "pod-do"}],
+                        "globalVolumes": [{"id": "gv1", "name": "poddo"}],
                         "pagination": {"hasNextPage": False},
                     },
                 )
@@ -215,21 +215,28 @@ def test_cli_help_and_init(tmp_path, monkeypatch, capsys):
         cli.main(["--help"])
     monkeypatch.chdir(tmp_path)
     assert cli.main(["init"]) == 0
-    assert (tmp_path / "pod-do.toml").exists()
+    assert (tmp_path / "poddo.toml").exists()
     assert cli.main(["init"]) == 1
 
 
 def test_pod_scripts_are_valid_bash():
-    from pod_do import pod_scripts as S
+    from poddo import pod_scripts as S
 
     names = ("BOOTSTRAP_SH", "START_SH", "FOLLOW_SH", "WATCHDOG_SH", "START_WATCHDOG", "ENV_SH")
-    for name in names + ("STATUS_SH", "PROGRESS_SH", "PUSH_SH", "SAVE_SH", "RESTORE_RESULTS_SH"):
+    for name in names + (
+        "STATUS_SH",
+        "PROGRESS_SH",
+        "PUSH_SH",
+        "SAVE_SH",
+        "RESTORE_RESULTS_SH",
+        "LEGACY_LINK",
+    ):
         r = subprocess.run(["bash", "-n"], input=getattr(S, name), text=True, capture_output=True)
         assert r.returncode == 0, f"{name}: {r.stderr}"
 
 
 def test_dotenv_key(tmp_path, monkeypatch):
-    from pod_do.config import api_key, dotenv_key
+    from poddo.config import api_key, dotenv_key
 
     sub = tmp_path / "a" / "b"
     sub.mkdir(parents=True)
@@ -245,7 +252,7 @@ def test_dotenv_key(tmp_path, monkeypatch):
 
 
 def test_create_waits_for_gpu(tmp_path, monkeypatch):
-    import pod_do.pod as podmod
+    import poddo.pod as podmod
 
     key = tmp_path / "k"
     key.write_text("")
@@ -285,7 +292,7 @@ def test_create_waits_for_gpu(tmp_path, monkeypatch):
 
 
 def test_image_ref_parse():
-    from pod_do.registry import ImageRef
+    from poddo.registry import ImageRef
 
     r = ImageRef.parse("ghcr.io/slackers-dev/splattwin-lhm:91ea1d25aa96")
     assert (r.host, r.repo, r.tag) == ("ghcr.io", "slackers-dev/splattwin-lhm", "91ea1d25aa96")
@@ -296,7 +303,7 @@ def test_image_ref_parse():
 
 
 def test_image_exists_uses_bearer_token(monkeypatch):
-    from pod_do import registry
+    from poddo import registry
 
     calls = []
 
@@ -316,7 +323,7 @@ def test_image_exists_uses_bearer_token(monkeypatch):
 
 
 def test_create_with_image_and_registry(tmp_path):
-    from pod_do.pod import image_ref
+    from poddo.pod import image_ref
 
     key = tmp_path / "k"
     key.write_text("")
@@ -340,7 +347,7 @@ def test_create_with_image_and_registry(tmp_path):
 
 
 def test_post_not_retried_on_server_error(monkeypatch):
-    import pod_do.api as apimod
+    import poddo.api as apimod
 
     monkeypatch.setattr(apimod.time, "sleep", lambda s: None)
     fake = FakeApi(
@@ -358,7 +365,7 @@ def test_post_not_retried_on_server_error(monkeypatch):
 
 
 def test_network_error_becomes_api_error(monkeypatch):
-    import pod_do.api as apimod
+    import poddo.api as apimod
 
     monkeypatch.setattr(apimod.time, "sleep", lambda s: None)
     calls = []
@@ -425,8 +432,8 @@ def test_put_files_sends_one_tar(monkeypatch, tmp_path):
     import io
     import tarfile
 
-    from pod_do import remote as remmod
-    from pod_do.api import Ssh
+    from poddo import remote as remmod
+    from poddo.api import Ssh
 
     sent = []
 
@@ -440,15 +447,15 @@ def test_put_files_sends_one_tar(monkeypatch, tmp_path):
     tmp_path = Path("/tmp/pd-test")
     r = remmod.Remote(Ssh("h", 22, "root", "pod1"), None, state=tmp_path)
     r._master_tried = True  # ohne Hintergrundverbindung
-    r.put_files({"/opt/pod-do/a.sh": ("echo a\n", 0o755), "/opt/pod-do/b": ("b", 0o644)}, then="echo ok")
+    r.put_files({"/opt/poddo/a.sh": ("echo a\n", 0o755), "/opt/poddo/b": ("b", 0o644)}, then="echo ok")
     assert len(sent) == 1
     cmd, data = sent[0]
-    assert "HostKeyAlias=pod-do-pod1" in cmd and f"ControlPath={tmp_path}/ssh/pod1" in cmd
+    assert "HostKeyAlias=poddo-pod1" in cmd and f"ControlPath={tmp_path}/ssh/pod1" in cmd
     assert cmd[-1].endswith("&& echo ok'")
     with tarfile.open(fileobj=io.BytesIO(data)) as t:
         m = {i.name: i for i in t.getmembers()}
-        assert m["opt/pod-do/a.sh"].mode == 0o755
-        assert t.extractfile("opt/pod-do/b").read() == b"b"
+        assert m["opt/poddo/a.sh"].mode == 0o755
+        assert t.extractfile("opt/poddo/b").read() == b"b"
 
 
 def test_set_config_escapes(tmp_path, monkeypatch):
@@ -457,14 +464,14 @@ def test_set_config_escapes(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     cli._set_config("registry_user", 'a"b\\c')
     cli._set_config("registry_user", "neu")
-    data = tomllib.loads((tmp_path / "pod-do" / "config.toml").read_text())
+    data = tomllib.loads((tmp_path / "poddo" / "config.toml").read_text())
     assert data == {"registry_user": "neu"}
     cli._set_config("registry_user", 'x"y')
-    assert tomllib.loads((tmp_path / "pod-do" / "config.toml").read_text())["registry_user"] == 'x"y'
+    assert tomllib.loads((tmp_path / "poddo" / "config.toml").read_text())["registry_user"] == 'x"y'
 
 
 def test_parse_status_and_progress():
-    from pod_do.task import JobStatus, bar, describe, parse_status, progress_of
+    from poddo.task import JobStatus, bar, describe, parse_status, progress_of
 
     out = (
         "a-1\trunning\t\t1000\t\t0\t3 12 Bilder\tsome log\n"
@@ -501,11 +508,11 @@ def test_no_save_without_volume(tmp_path):
     Pods(None, GlobalConfig(ssh_key=None, volume=""), project(tmp_path)).start_job(
         R(), "j", "echo", save=["out"]
     )
-    assert list(sent) == ["/opt/pod-do/jobs/j/run.sh"]  # ohne Volume: nichts zu sichern
+    assert list(sent) == ["/opt/poddo/jobs/j/run.sh"]  # ohne Volume: nichts zu sichern
 
 
 def test_save_config_written(tmp_path):
-    from pod_do.pod import results_archive
+    from poddo.pod import results_archive
 
     sent = {}
 
@@ -517,7 +524,51 @@ def test_save_config_written(tmp_path):
     Pods(None, GlobalConfig(ssh_key=None, keep_results_days=7), p).start_job(
         R(), "j-1", "echo", save=["out", "extra/file.txt"]
     )
-    conf = sent["/opt/pod-do/jobs/j-1/save.conf"][0]
-    assert "DEST=/vol/pod-do/results/Mein-Projekt/j-1.tar.zst" in conf and "DAYS=7" in conf
-    assert sent["/opt/pod-do/jobs/j-1/save.list"][0] == "out\nextra/file.txt\n"
-    assert results_archive("a/b c", "j") == "/vol/pod-do/results/a-b-c/j.tar.zst"
+    conf = sent["/opt/poddo/jobs/j-1/save.conf"][0]
+    assert "DEST=/vol/poddo/results/Mein-Projekt/j-1.tar.zst" in conf and "DAYS=7" in conf
+    assert sent["/opt/poddo/jobs/j-1/save.list"][0] == "out\nextra/file.txt\n"
+    assert results_archive("a/b c", "j") == "/vol/poddo/results/a-b-c/j.tar.zst"
+
+
+# -- Umbenennung pod-do -> poddo: alte Pods, Volumes, Projekte und Ordner gehen weiter -----------------
+
+
+def test_legacy_pod_volume_and_project(tmp_path):
+    (tmp_path / "pod-do.toml").write_text(TEMPLATE)
+    p = Project.find(tmp_path)
+    old = {"id": "old", "name": pod_name(p.name, "main", "pod-do"), "status": "RUNNING"}
+    fake = FakeApi(
+        {
+            ("GET", "/v2/pods"): [(200, {"pods": [old], "pagination": {}})],
+            ("GET", "/v2/global-volumes"): [(200, {"globalVolumes": [{"id": "v1", "name": "pod-do"}]})],
+        }
+    )
+    pods = Pods(RunPod("k", transport=fake), GlobalConfig(ssh_key=None, volume="poddo"), p)
+    assert pods.find("main")["id"] == "old"
+    assert [x["id"] for x in pods.mine()] == ["old"]
+    assert pods.volume_id() == "v1"
+    assert cli.is_ours("pod-do-x-main") and cli.is_ours("poddo-x-main") and not cli.is_ours("other")
+
+
+def test_legacy_state_dir_renamed(tmp_path, monkeypatch):
+    from poddo.config import state_dir
+
+    (tmp_path / "pod-do" / "proj").mkdir(parents=True)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    assert state_dir() == tmp_path / "poddo"
+    assert (tmp_path / "poddo" / "proj").is_dir() and not (tmp_path / "pod-do").exists()
+
+
+@pytest.mark.parametrize("old_real", [True, False])
+def test_legacy_link_on_pod(tmp_path, old_real):
+    from poddo import pod_scripts as S
+
+    if old_real:  # Docker-Image oder alter Pod: echter Ordner /opt/pod-do mit Umgebung
+        (tmp_path / "pod-do" / "envs").mkdir(parents=True)
+    script = S.LEGACY_LINK.replace("/opt/", f"{tmp_path}/")
+    for _ in range(2):  # zweimal: darf nichts kaputt machen
+        subprocess.run(["bash", "-c", script], check=True)
+    assert (tmp_path / "poddo").is_dir() and (tmp_path / "pod-do").is_dir()
+    assert (tmp_path / ("poddo" if old_real else "pod-do")).is_symlink()
+    (tmp_path / "poddo" / "x").write_text("1")
+    assert (tmp_path / "pod-do" / "x").read_text() == "1"

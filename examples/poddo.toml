@@ -1,26 +1,26 @@
-# pod-do: schwere Aufgaben auf einer RunPod-GPU rechnen. Doku: https://github.com/slackers-dev/pod-do
+# poddo: schwere Aufgaben auf einer RunPod-GPU rechnen. Doku: https://github.com/slackers-dev/poddo
 
-# Eine Umgebung = Docker-Image + einmaliges Setup. Was setup nach $POD_DO_ENV installiert, sichert
-# pod-do als Archiv auf dem Volume. Beim naechsten Pod ist es in ein, zwei Minuten wieder da.
+# Eine Umgebung = Docker-Image + einmaliges Setup. Was setup nach $PODDO_ENV installiert, sichert
+# poddo als Archiv auf dem Volume. Beim naechsten Pod ist es in ein, zwei Minuten wieder da.
 [env.main]
 image = "runpod/pytorch:2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04"
 min_vram = 8          # GB, filtert die GPU-Liste
 # gpus = ["NVIDIA RTX A4500", "NVIDIA A40"]   # eigene Reihenfolge, sonst die globale
 boot = "apt-get update -qq && apt-get install -y -qq ffmpeg"
 setup = '''
-cd "$POD_DO_ENV"
+cd "$PODDO_ENV"
 uv venv --python 3.10 .venv
 uv pip install --python .venv/bin/python numpy
 '''
 
-# Eine Aufgabe: hochladen, rechnen, herunterladen. {name} sind Argumente von `pod-do run`.
+# Eine Aufgabe: hochladen, rechnen, herunterladen. {name} sind Argumente von `poddo run`.
 [task.hello]
 env = "main"
 args = ["input", "name?"]
 defaults = { name = "{input.stem}" }
 upload = { "in" = "{input}" }                # Job-Ordner/in  <-  lokaler Pfad
 run = '''
-source "$POD_DO_ENV/.venv/bin/activate"
+source "$PODDO_ENV/.venv/bin/activate"
 mkdir -p out
 python -c "import numpy; print('numpy', numpy.__version__)" | tee out/info.txt
 ls -la in >> out/info.txt

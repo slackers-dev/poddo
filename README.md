@@ -1,69 +1,105 @@
-<h1>
+<p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
-    <img src="assets/logo.svg" alt="" height="28">
+    <img src="assets/logo.svg" alt="poddo" height="64">
   </picture>
-  pod-do
-</h1>
+</p>
 
-Schwere Aufgaben vom Laptop auf eine GPU bei [RunPod](https://www.runpod.io) abgeben. Ein Befehl startet
-einen Pod, lädt die Eingaben hoch, rechnet, holt das Ergebnis zurück. Ein Wächter auf dem Pod löscht ihn,
-wenn er nichts mehr zu tun hat.
+<h1 align="center">poddo</h1>
+
+<p align="center">
+  <b>pod, do:</b> schwere Jobs vom Laptop auf eine GPU bei <a href="https://www.runpod.io">RunPod</a>.<br>
+  Ein Befehl startet den Pod, rechnet, holt das Ergebnis und räumt hinter sich auf.
+</p>
+
+<p align="center">
+  <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-3776ab">
+  <img alt="Nur Standardbibliothek" src="https://img.shields.io/badge/dependencies-none-2f6bff">
+  <img alt="Lizenz MIT" src="https://img.shields.io/badge/license-MIT-151515">
+</p>
 
 ```sh
-pod-do run lhm ~/Desktop/fotos-beniam      # Pod starten, Fotos hoch, rechnen, avatar.ply zurück
-pod-do down                                # Pod sofort weg (sonst nach 20 min Leerlauf)
+poddo run train ./data --detach   # Pod starten, Daten hoch, trainieren, Laptop darf zu
+poddo jobs                        # Stand und Fortschritt
+poddo attach                      # Ergebnis holen, auch wenn der Pod schon weg ist
 ```
 
-> **Stand 26.11.2026:** auf RunPod getestet. Beispiel LHM++ (SplatTwin): Setup einmal etwa 25 Minuten,
-> Archiv 14 GB auf dem Volume. Danach dauert `pod-do run` auf einem frischen Pod von null bis zum
-> Ergebnis gut 5 Minuten (davon etwa 1 Minute rechnen) und kostet auf einer L4 rund 6 Rappen.
+## Warum
+
+Ein Modell trainieren, das auf dem Laptop drei Tage bräuchte? Mit poddo gibst du es an eine gemietete GPU ab
+und arbeitest weiter.
+
+- **Einrichten nur einmal.** Die Umgebung (Pakete, CUDA-Erweiterungen, Modelle) wird einmal gebaut und auf
+  einem Volume gesichert. Jeder spätere Pod hat sie in Minuten, auf jeder GPU, in jeder Region.
+- **Der Laptop darf zu.** Jobs laufen auf dem Pod weiter. Ergebnisse landen auf dem Volume und warten dort,
+  bis du sie abholst.
+- **Keine vergessenen Pods.** Ein Wächter löscht den Pod, sobald er nichts mehr zu tun hat. Du zahlst nur die
+  Minuten, in denen er gearbeitet hat.
+- **Klein.** Ein Python-Paket ohne Abhängigkeiten, dazu ssh und tar.
+
+> **Auf RunPod getestet (26.11.2026).** Beispiel 3D-Avatar aus Fotos (LHM++): Setup einmal etwa 25 Minuten,
+> Archiv 14 GB auf dem Volume. Danach braucht `poddo run` auf einem frischen Pod gut 5 Minuten bis zum
+> Ergebnis (davon etwa 1 Minute rechnen) und kostet auf einer L4 rund 6 Rappen.
+
+## Schnellstart
+
+**Du brauchst:** ein [RunPod-Konto](https://www.runpod.io) mit etwas Guthaben, [uv](https://docs.astral.sh/uv/),
+und einen SSH-Schlüssel (`ssh-keygen -t ed25519`, falls du noch keinen hast).
+
+```sh
+# 1. Installieren
+uv tool install git+https://github.com/slackers-dev/pod-do
+
+# 2. Einmal pro Rechner
+poddo login              # API-Schlüssel (RunPod → Settings → API Keys), landet im macOS-Schlüsselbund
+poddo volume --create    # Global Volume "poddo" anlegen (die ersten 100 GB sind gratis)
+poddo gpus --min-vram 8  # welche GPUs gibt es, was kosten sie
+
+# 3. In deinem Projekt
+poddo init               # legt poddo.toml mit Beispiel an
+poddo check              # Konfiguration prüfen, ohne etwas zu starten
+poddo run <aufgabe>      # los
+```
+
+Fertig? `poddo status` zeigt, ob noch Pods laufen. `poddo down` löscht sie sofort; sonst macht es der Wächter
+nach 20 Minuten Leerlauf.
 
 ## Wie es funktioniert
 
 - **Umgebung einmal einrichten, danach in Minuten da.** Jedes Projekt beschreibt seine Umgebung: Docker-Image
-  und Setup-Skript. Beim ersten Mal läuft das Setup (Pakete, CUDA-Erweiterungen, Modelle) und landet in
-  `$POD_DO_ENV`. pod-do packt den Ordner und legt ihn auf ein **Global Volume** von RunPod. Jeder spätere
-  Pod holt ihn von dort, in jeder Region und auf jeder GPU.
+  und Setup-Skript. Beim ersten Mal läuft das Setup und landet in `$PODDO_ENV`. poddo packt den Ordner und
+  legt ihn auf ein **Global Volume** von RunPod. Jeder spätere Pod holt ihn von dort.
 - **Keine Bindung an ein Rechenzentrum.** Ein Network Volume hängt an einem Rechenzentrum. Ist dort keine
-  GPU frei, kommt man nicht an seine Daten. Ein Global Volume geht überall (die ersten 100 GB sind gratis),
-  darum kann pod-do einfach die erste freie GPU aus deiner Liste nehmen.
+  GPU frei, kommt man nicht an seine Daten. Ein Global Volume geht überall, darum kann poddo einfach die
+  erste freie GPU aus deiner Liste nehmen.
 - **Jobs laufen losgelöst von der Verbindung.** Bricht die Verbindung ab, drückst du Ctrl-C oder klappst du
-  den Laptop zu, rechnet der Pod weiter. `pod-do attach` hängt sich wieder an und holt das Ergebnis.
-  `pod-do run --detach` startet nur und kehrt sofort zurück.
+  den Laptop zu, rechnet der Pod weiter. `poddo attach` hängt sich wieder an und holt das Ergebnis.
+  `poddo run --detach` startet nur und kehrt sofort zurück.
 - **Wächter gegen vergessene Pods.** Der Pod löscht sich nach `idle_minutes` ohne Job und ohne SSH-Sitzung
   selbst, spätestens nach `max_hours`. Kommt ein eben angelegter Pod nicht bis zum Wächter (kein SSH,
-  Ctrl-C, Fehler), löscht pod-do ihn sofort wieder. Das Anlegen wiederholt pod-do bei Server- oder
+  Ctrl-C, Fehler), löscht poddo ihn sofort wieder. Das Anlegen wiederholt poddo bei Server- oder
   Netzfehlern nie, damit nicht unbemerkt ein zweiter Pod entsteht.
 - **Eine SSH-Verbindung pro Pod.** Alle Befehle laufen über eine gemeinsame Verbindung (ControlMaster,
   hält 2 Minuten nach dem letzten Befehl), die Skripte gehen in einem einzigen tar hinüber. Der
-  Host-Schlüssel wird beim ersten Kontakt pro Pod gemerkt (`~/.local/state/pod-do/known_hosts`) und danach
+  Host-Schlüssel wird beim ersten Kontakt pro Pod gemerkt (`~/.local/state/poddo/known_hosts`) und danach
   geprüft.
 - **Optional als Docker-Image.** Die fertige Umgebung kann auch als Image in einer Registry liegen,
   gebaut direkt auf dem Pod (siehe unten).
-- **Nur Standardbibliothek.** Python ab 3.11, ssh und tar. Spricht die RunPod REST API v2.
 
-## Einrichten (einmal pro Rechner)
-
-```sh
-uv tool install git+https://github.com/slackers-dev/pod-do   # oder: uv tool install -e <pfad zum Klon>
-pod-do login            # API-Schlüssel (RunPod → Settings → API Keys) in den macOS-Schlüsselbund
-pod-do volume --create  # Global Volume "pod-do" anlegen
-pod-do gpus --min-vram 8
-```
+## Einstellungen
 
 Der API-Schlüssel kommt aus der Umgebungsvariable `RUNPOD_API_KEY` oder `POD_API_KEY`, sonst aus der
 nächsten `.env` (im aktuellen Ordner oder darüber, gleiche Namen), sonst aus dem Schlüsselbund (Eintrag
-`pod-do`), sonst aus `~/.config/pod-do/api_key`. Eine `.env` gehört in `.gitignore`.
+`poddo`), sonst aus `~/.config/poddo/api_key`. Eine `.env` gehört in `.gitignore`.
 
-SSH: pod-do nimmt `~/.ssh/id_runpod`, `~/.ssh/id_ed25519` oder `~/.ssh/id_rsa` (den ersten, den es gibt) und
+SSH: poddo nimmt `~/.ssh/id_runpod`, `~/.ssh/id_ed25519` oder `~/.ssh/id_rsa` (den ersten, den es gibt) und
 gibt den öffentlichen Schlüssel dem Pod mit. In der RunPod-Konsole muss nichts eingetragen werden.
 
-Optionale globale Einstellungen in `~/.config/pod-do/config.toml`:
+Optionale globale Einstellungen in `~/.config/poddo/config.toml`:
 
 ```toml
 ssh_key = "~/.ssh/id_runpod"
-volume = "pod-do"           # Name des Global Volume, "" = ohne (dann läuft setup auf jedem Pod)
+volume = "poddo"            # Name des Global Volume, "" = ohne (dann läuft setup auf jedem Pod)
 cloud = "SECURE"            # oder "COMMUNITY" (günstiger, nicht jede Maschine hat eine öffentliche IP)
 gpus = ["NVIDIA RTX A4500", "NVIDIA RTX A4000", "NVIDIA A40"]   # Reihenfolge = Vorliebe
 idle_minutes = 20
@@ -75,11 +111,11 @@ keep_results_days = 30      # nie abgeholte Ergebnisse auf dem Volume nach so vi
 
 ## In einem Projekt verwenden
 
-`pod-do init` legt eine `pod-do.toml` mit Beispiel an ([`examples/pod-do.toml`](examples/pod-do.toml)).
+`poddo init` legt eine `poddo.toml` mit Beispiel an ([`examples/poddo.toml`](examples/poddo.toml)).
 Aufbau:
 
 ```toml
-project = "splattwin"       # optional, sonst Ordnername. Pods heissen pod-do-<project>-<env>.
+project = "splattwin"       # optional, sonst Ordnername. Pods heissen poddo-<project>-<env>.
 
 [env.lhm]                   # eine Umgebung = ein Pod-Typ
 image = "runpod/pytorch:2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04"
@@ -88,17 +124,17 @@ cuda = "12.1"               # niedrigste CUDA-Version des Hosts (optional)
 disk = 80                   # GB Container-Disk
 gpus = ["NVIDIA RTX A4500", "NVIDIA A40"]   # optional, sonst die globale Liste
 boot = "apt-get update -qq && apt-get install -y -qq ffmpeg libgl1"   # bei jedem Pod-Start
-setup_file = "scripts/pod-do/setup-lhm.sh"  # einmal, Ergebnis in $POD_DO_ENV wird gesichert
+setup_file = "scripts/poddo/setup-lhm.sh"  # einmal, Ergebnis in $PODDO_ENV wird gesichert
 vars = { PYTHONUNBUFFERED = "1" }           # Umgebungsvariablen auf dem Pod
 
 [task.lhm]                  # eine Aufgabe
 env = "lhm"
-args = ["fotos", "name?"]   # Argumente von `pod-do run lhm <fotos> [name]`, ? = optional
+args = ["fotos", "name?"]   # Argumente von `poddo run lhm <fotos> [name]`, ? = optional
 defaults = { name = "{fotos.name}" }
-before = "scripts/pod-do/heic-zu-jpg.sh"    # lokal, vor dem Hochladen (optional)
+before = "scripts/poddo/heic-zu-jpg.sh"    # lokal, vor dem Hochladen (optional)
 upload = { "images" = "{fotos}" }           # Job-Ordner/images  <-  lokaler Ordner oder Datei
 run = '''
-cd "$POD_DO_ENV/LHM-plusplus" && source .venv/bin/activate
+cd "$PODDO_ENV/LHM-plusplus" && source .venv/bin/activate
 python scripts/inference/to_gs_ply.py --images_dir "$JOB/images" --output "$JOB/out/avatar.ply"
 '''
 download = { "out" = "data/lhm/{name}" }    # Job-Ordner/out  ->  lokaler Ordner
@@ -121,21 +157,21 @@ Grossbuchstaben bereit (`$FOTOS`, `$NAME`). Dazu kommen:
 | Variable | Inhalt |
 |---|---|
 | `$JOB` | Job-Ordner, auch das Arbeitsverzeichnis von `run` |
-| `$POD_DO_ENV` | eingerichtete Umgebung (`/opt/pod-do/envs/<env>`) |
-| `$POD_DO_CACHE` | Ordner auf dem Volume, überlebt alles. Ohne Dateisperren, also nicht für Download-Caches |
-| `$HF_HOME`, `$TORCH_HOME` | in `$POD_DO_ENV/.cache/`, damit Modelle aus dem Setup ins Archiv kommen |
+| `$PODDO_ENV` | eingerichtete Umgebung (`/opt/poddo/envs/<env>`) |
+| `$PODDO_CACHE` | Ordner auf dem Volume, überlebt alles. Ohne Dateisperren, also nicht für Download-Caches |
+| `$HF_HOME`, `$TORCH_HOME` | in `$PODDO_ENV/.cache/`, damit Modelle aus dem Setup ins Archiv kommen |
 
-**Was ins Setup gehört:** alles, was lange dauert und sich selten ändert, auch Modelle. Es muss nach `$POD_DO_ENV`
-installieren (das ist auch das Arbeitsverzeichnis). Eine venv mit `uv venv` dort anlegen; pod-do setzt
-`UV_PYTHON_INSTALL_DIR`, damit auch Python selbst in `$POD_DO_ENV` liegt und das Archiv auf jedem Pod
+**Was ins Setup gehört:** alles, was lange dauert und sich selten ändert, auch Modelle. Es muss nach `$PODDO_ENV`
+installieren (das ist auch das Arbeitsverzeichnis). Eine venv mit `uv venv` dort anlegen; poddo setzt
+`UV_PYTHON_INSTALL_DIR`, damit auch Python selbst in `$PODDO_ENV` liegt und das Archiv auf jedem Pod
 funktioniert. `uv` ist auf dem Pod schon da und legt `.pyc`-Dateien gleich beim Installieren an
 (`UV_COMPILE_BYTECODE`), damit der erste `import` auf jedem Pod schneller ist. Systempakete (apt) gehören in
 `boot`, die landen nicht im Archiv. `boot` läuft im Hintergrund, während die Umgebung vom Volume kommt
-(Log: `/opt/pod-do/boot.log`), darf sich also nicht auf `$POD_DO_ENV` verlassen.
+(Log: `/opt/poddo/boot.log`), darf sich also nicht auf `$PODDO_ENV` verlassen.
 
 Namen von Umgebungen und Aufgaben: nur Buchstaben, Ziffern, `_`, `.` und `-`.
 
-**Neu einrichten:** Ändert sich `image` oder `setup`, richtet pod-do automatisch neu ein und ersetzt das
+**Neu einrichten:** Ändert sich `image` oder `setup`, richtet poddo automatisch neu ein und ersetzt das
 Archiv. Achtung: Dazu zählt jede Änderung am Setup-Skript, auch an Kommentaren.
 
 ## Umgebung als Docker-Image (optional)
@@ -150,79 +186,79 @@ image = "runpod/pytorch:2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04"   # Basis
 docker = "ghcr.io/slackers-dev/splattwin-lhm"                       # fertige Umgebung, Tag = Setup-Hash
 ```
 
-**So entsteht es:** Gibt es `<docker>:<setup-hash>` noch nicht, richtet pod-do den Pod wie gewohnt ein
-(Archiv vom Volume oder Setup). Danach packt der Pod `/opt/pod-do/envs/<env>` in Layer von etwa 4 GB
+**So entsteht es:** Gibt es `<docker>:<setup-hash>` noch nicht, richtet poddo den Pod wie gewohnt ein
+(Archiv vom Volume oder Setup). Danach packt der Pod `/opt/poddo/envs/<env>` in Layer von etwa 4 GB
 (`pigz`) und hängt sie mit [crane](https://github.com/google/go-containerregistry) an das Basis-Image,
 ohne Docker-Daemon (der fehlt in RunPod-Pods). Ändert sich `image` oder `setup`, gibt es einen neuen Tag.
-Von Hand: `pod-do image <env>`, nur prüfen: `pod-do image <env> --check`.
+Von Hand: `poddo image <env>`, nur prüfen: `poddo image <env> --check`.
 
 **Einmal einrichten (Beispiel ghcr.io):**
 
 1. Auf GitHub einen Token (classic) mit nur `write:packages` und `read:packages` anlegen.
-2. `pod-do registry login ghcr.io --user <github-name>`: Token in den Schlüsselbund, Benutzer in die Konfig.
-   Alternativ `POD_DO_REGISTRY_TOKEN` in der Umgebung oder in `.env`.
-3. `pod-do registry runpod`: dieselben Zugangsdaten bei RunPod hinterlegen (Name `pod-do`, änderbar mit
+2. `poddo registry login ghcr.io --user <github-name>`: Token in den Schlüsselbund, Benutzer in die Konfig.
+   Alternativ `PODDO_REGISTRY_TOKEN` in der Umgebung oder in `.env`.
+3. `poddo registry runpod`: dieselben Zugangsdaten bei RunPod hinterlegen (Name `poddo`, änderbar mit
    `runpod_registry`), damit Pods das private Image ziehen können. Braucht einen API-Schlüssel mit dem Recht
    «Secrets». Oder in der RunPod-Konsole unter *Settings → Container Registry Auth* von Hand.
 
 Der Token geht beim Hochladen nur über SSH-stdin an den Pod, er steht nie in dessen Umgebung, und nach dem
 Hochladen meldet sich crane wieder ab. Fehlt der
-Zugang, arbeitet pod-do mit einem Hinweis wie ohne `docker` weiter.
+Zugang, arbeitet poddo mit einem Hinweis wie ohne `docker` weiter.
 
 **Was nicht ins Image kommt:** Systempakete aus `boot` (die laufen weiter bei jedem Start) und alles
-ausserhalb von `$POD_DO_ENV`. Images mit Modellen, die nur für Forschung freigegeben sind, privat halten.
+ausserhalb von `$PODDO_ENV`. Images mit Modellen, die nur für Forschung freigegeben sind, privat halten.
 
 ## Befehle
 
 | Befehl | Was |
 |---|---|
-| `pod-do run <aufgabe> [args]` | Pod suchen oder starten, Umgebung herstellen, hochladen, rechnen, holen. `--detach` startet nur, `--down` löscht danach, `--gpu <id>` wählt die Karte, `--wait <min>` wartet auf eine freie |
-| `pod-do up [env]` | nur Pod starten und bereitmachen |
-| `pod-do attach [job]` | wieder an einen Job hängen (Standard: der letzte), dann Ergebnis holen |
-| `pod-do jobs [--watch]` | letzte Jobs mit Stand und Fortschritt |
-| `pod-do logs [job] [-f]` | Log eines Jobs, mit `-f` mitlesen |
-| `pod-do ssh [env]` | Shell auf dem Pod |
-| `pod-do status` | Guthaben, laufende pod-do-Pods, Volume |
-| `pod-do down [env]` / `--all` | Pods dieses Projekts löschen, oder alle pod-do-Pods |
-| `pod-do gpus [--min-vram N]` | GPUs mit Preis und Verfügbarkeit, die IDs für `gpus = [...]` |
-| `pod-do check` | Konfiguration und GPU-Wahl prüfen, ohne etwas zu starten |
-| `pod-do volume [--create]` | Global Volume anzeigen oder anlegen |
-| `pod-do image [env] [--check]` | Umgebung als Docker-Image bauen und hochladen (`docker = ...`) |
-| `pod-do registry login\|runpod [host] [--user]` | Zugang zur Registry lokal oder bei RunPod hinterlegen |
+| `poddo run <aufgabe> [args]` | Pod suchen oder starten, Umgebung herstellen, hochladen, rechnen, holen. `--detach` startet nur, `--down` löscht danach, `--gpu <id>` wählt die Karte, `--wait <min>` wartet auf eine freie |
+| `poddo up [env]` | nur Pod starten und bereitmachen |
+| `poddo attach [job]` | wieder an einen Job hängen (Standard: der letzte), dann Ergebnis holen |
+| `poddo jobs [--watch]` | letzte Jobs mit Stand und Fortschritt |
+| `poddo logs [job] [-f]` | Log eines Jobs, mit `-f` mitlesen |
+| `poddo ssh [env]` | Shell auf dem Pod |
+| `poddo status` | Guthaben, laufende poddo-Pods, Volume |
+| `poddo down [env]` / `--all` | Pods dieses Projekts löschen, oder alle poddo-Pods |
+| `poddo gpus [--min-vram N]` | GPUs mit Preis und Verfügbarkeit, die IDs für `gpus = [...]` |
+| `poddo check` | Konfiguration und GPU-Wahl prüfen, ohne etwas zu starten |
+| `poddo volume [--create]` | Global Volume anzeigen oder anlegen |
+| `poddo image [env] [--check]` | Umgebung als Docker-Image bauen und hochladen (`docker = ...`) |
+| `poddo registry login\|runpod [host] [--user]` | Zugang zur Registry lokal oder bei RunPod hinterlegen |
 
 ## Ergebnisse abholen
 
 Am Ende jedes Jobs sichert der Pod die Pfade aus `download` (dazu `log` und `exitcode`) auf dem **Global
-Volume**, unter `/vol/pod-do/results/<projekt>/<job>.tar.zst`. Erst danach gilt der Job als fertig. So
+Volume**, unter `/vol/poddo/results/<projekt>/<job>.tar.zst`. Erst danach gilt der Job als fertig. So
 überleben die Ergebnisse den Pod, auch wenn der Laptop aus ist und der Wächter den Pod löscht.
 
-- **`pod-do attach [job]`** holt die Ergebnisse: vom Pod, wenn er noch läuft, sonst vom Volume. Dafür nimmt
-  pod-do einen laufenden Pod des Projekts oder startet kurz einen (ohne Umgebung herzustellen, etwa eine Minute,
+- **`poddo attach [job]`** holt die Ergebnisse: vom Pod, wenn er noch läuft, sonst vom Volume. Dafür nimmt
+  poddo einen laufenden Pod des Projekts oder startet kurz einen (ohne Umgebung herzustellen, etwa eine Minute,
   ungefähr 1 Rappen) und löscht ihn danach wieder.
-- **`pod-do run`** holt nebenbei alle Ergebnisse früherer Jobs, die noch auf dem Volume liegen, gratis, weil
+- **`poddo run`** holt nebenbei alle Ergebnisse früherer Jobs, die noch auf dem Volume liegen, gratis, weil
   der Pod sowieso läuft.
-- Nach dem Herunterladen löscht pod-do die Kopie auf dem Volume. Nie abgeholte Kopien löscht der Pod nach
+- Nach dem Herunterladen löscht poddo die Kopie auf dem Volume. Nie abgeholte Kopien löscht der Pod nach
   `keep_results_days` (Standard 30) Tagen.
 - Ist ein Job gesichert, löscht der Wächter den Pod nach der normalen Leerlaufzeit (`idle_minutes`). Ohne
   Volume oder wenn das Sichern nicht ging, wartet er `keep_results_minutes` (Standard 60), weil die Ergebnisse
   dann nur auf dem Pod liegen. Das Warten kostet GPU-Zeit.
 - Verloren sind Ergebnisse nur, wenn der Job nicht fertig wurde, bevor der Pod gelöscht wurde (etwa nach
   `max_hours`), oder ohne Volume.
-- Koppelst du dich ab (Ctrl-C, `--detach`, Verbindung weg), zeigt pod-do gut sichtbar, wie du die Ergebnisse
-  holst. `pod-do status` listet alle Jobs, deren Ergebnisse noch fehlen.
-- Auf dem Mac kommt zusätzlich eine Mitteilung, wenn pod-do die Ergebnisse geholt hat.
+- Koppelst du dich ab (Ctrl-C, `--detach`, Verbindung weg), zeigt poddo gut sichtbar, wie du die Ergebnisse
+  holst. `poddo status` listet alle Jobs, deren Ergebnisse noch fehlen.
+- Auf dem Mac kommt zusätzlich eine Mitteilung, wenn poddo die Ergebnisse geholt hat.
 
 ## Stand und Fortschritt
 
 ```sh
-pod-do jobs            # letzte Jobs: läuft (mit Fortschrittsbalken), fertig, abgeholt oder verloren
-pod-do jobs --watch    # alle 5 s neu
-pod-do logs -f         # Log des letzten Jobs mitlesen, bis er fertig ist
+poddo jobs            # letzte Jobs: läuft (mit Fortschrittsbalken), fertig, abgeholt oder verloren
+poddo jobs --watch    # alle 5 s neu
+poddo logs -f         # Log des letzten Jobs mitlesen, bis er fertig ist
 ```
 
-Den Fortschritt liest pod-do aus einer [tqdm](https://github.com/tqdm/tqdm)-Zeile im Log, ohne dass du etwas
-tun musst. Genauer geht es aus dem eigenen Skript mit `pod-do-progress <erledigt> <total> [text]`, z. B.
-`pod-do-progress 7 12 "Bild 7"`.
+Den Fortschritt liest poddo aus einer [tqdm](https://github.com/tqdm/tqdm)-Zeile im Log, ohne dass du etwas
+tun musst. Genauer geht es aus dem eigenen Skript mit `poddo-progress <erledigt> <total> [text]`, z. B.
+`poddo-progress 7 12 "Bild 7"`.
 
 ## Kosten
 
@@ -233,11 +269,11 @@ tun musst. Genauer geht es aus dem eigenen Skript mit `pod-do-progress <erledigt
 
 ## Auf dem Pod
 
-Alles von pod-do liegt unter `/opt/pod-do`: `envs/`, `jobs/<job>/` (run.sh, log, exitcode, started,
+Alles von poddo liegt unter `/opt/poddo`: `envs/`, `jobs/<job>/` (run.sh, log, exitcode, started,
 finished, progress, saved, fetched), `boot.log`,
 `watchdog.log`.
-Das Volume ist unter `/vol` eingehängt, die Archive der Umgebungen liegen in `/vol/pod-do/envs/`, gesicherte
-Ergebnisse in `/vol/pod-do/results/`.
+Das Volume ist unter `/vol` eingehängt, die Archive der Umgebungen liegen in `/vol/poddo/envs/`, gesicherte
+Ergebnisse in `/vol/poddo/results/`.
 
 ## Grenzen
 
@@ -246,7 +282,14 @@ Ergebnisse in `/vol/pod-do/results/`.
   dort und wird auf die lokale Disk des Pods entpackt.
 - Der Wächter löscht den Pod über die API mit dem Schlüssel, den RunPod dem Pod mitgibt. Geht das nicht,
   beendet er den Container. Dann kostet die GPU nichts mehr, der Pod steht aber noch als EXITED in der Liste.
-  `pod-do status` zeigt das, `pod-do down` räumt auf.
+  `poddo status` zeigt das, `poddo down` räumt auf.
+
+## Umstieg von pod-do
+
+Früher hiess das Tool `pod-do`. Alte Namen gehen weiter: `pod-do.toml` im Projekt, das Volume `pod-do`,
+laufende `pod-do-…`-Pods, Umgebungen und Ergebnisse darauf, `$POD_DO_ENV` in Skripten. Der Ordner
+`~/.local/state/pod-do` wird beim ersten Aufruf umbenannt. Den alten Befehl entfernen:
+`uv tool uninstall pod-do`.
 
 ## Entwickeln
 

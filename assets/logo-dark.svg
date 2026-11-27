@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="24" viewBox="0 0 48 24" fill="none">
-  <title>pod-do</title>
+  <title>poddo</title>
   <circle cx="10" cy="12" r="7" stroke="#f2f0eb" stroke-width="2.5"/>
   <line x1="17" y1="12" x2="31" y2="12" stroke="#f2f0eb" stroke-width="2.5" stroke-dasharray="3 3"/>
   <circle cx="38" cy="12" r="7" fill="#2f6bff"/>

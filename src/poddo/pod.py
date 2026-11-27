@@ -12,26 +12,31 @@ from dataclasses import dataclass
 from . import pod_scripts as S
 from . import registry
 from .api import ApiError, RunPod, ssh_of
-from .config import ConfigError, EnvSpec, GlobalConfig, Project
+from .config import LEGACY, ConfigError, EnvSpec, GlobalConfig, Project
 from .remote import Remote, RemoteError
 
 VOLUME_PATH = "/vol"
-RESULTS_PATH = f"{VOLUME_PATH}/pod-do/results"
+RESULTS_PATH = f"{VOLUME_PATH}/poddo/results"
+LEGACY_RESULTS = f"{VOLUME_PATH}/{LEGACY}/results"
 ALIVE = ("PROVISIONING", "STARTING", "RUNNING")
 
 
 def say(msg: str) -> None:
-    print(f"[pod-do] {msg}", file=sys.stderr, flush=True)
+    print(f"[poddo] {msg}", file=sys.stderr, flush=True)
 
 
-def pod_name(project: str, env: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9-]+", "-", f"pod-do-{project}-{env}").strip("-").lower()
+def pod_name(project: str, env: str, prefix: str = "poddo") -> str:
+    return re.sub(r"[^a-zA-Z0-9-]+", "-", f"{prefix}-{project}-{env}").strip("-").lower()
 
 
-def results_archive(project: str, job: str) -> str:
+def is_ours(name: str) -> bool:
+    return name.startswith(("poddo-", f"{LEGACY}-"))
+
+
+def results_archive(project: str, job: str, base: str = RESULTS_PATH) -> str:
     """Wo die Ergebnisse eines Jobs auf dem Volume liegen."""
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", project).strip("-") or "projekt"
-    return f"{RESULTS_PATH}/{safe}/{job}.tar.zst"
+    return f"{base}/{safe}/{job}.tar.zst"
 
 
 def image_ref(env: EnvSpec) -> str | None:
@@ -61,7 +66,7 @@ def gpu_candidates(api: RunPod, wanted: list[str], min_vram: int, cloud: str) ->
     for gid in wanted:
         g = catalog.get(gid) or next((c for c in catalog.values() if c.get("name") == gid), None)
         if not g:
-            say(f"GPU {gid!r} kennt RunPod nicht (pod-do gpus zeigt die Namen)")
+            say(f"GPU {gid!r} kennt RunPod nicht (poddo gpus zeigt die Namen)")
             continue
         if g.get("memory", 0) < min_vram:
             continue
@@ -82,24 +87,26 @@ class Pods:
     # -- Suchen -----------------------------------------------------------------------------------
 
     def find(self, env: str) -> dict | None:
-        name = pod_name(self.project.name, env)
+        names = {pod_name(self.project.name, env), pod_name(self.project.name, env, LEGACY)}
         for p in self.api.list_pods():
-            if p.get("name") == name and p.get("status") in ALIVE:
+            if p.get("name") in names and p.get("status") in ALIVE:
                 return p
         return None
 
     def mine(self) -> list[dict]:
-        prefix = pod_name(self.project.name, "")
-        return [p for p in self.api.list_pods() if p.get("name", "").startswith(prefix)]
+        prefixes = (pod_name(self.project.name, "") + "-", pod_name(self.project.name, "", LEGACY) + "-")
+        return [p for p in self.api.list_pods() if p.get("name", "").startswith(prefixes)]
 
     # -- Volume -----------------------------------------------------------------------------------
 
     def volume_id(self, create: bool = False) -> str | None:
         if not self.cfg.volume:
             return None
-        for v in self.api.global_volumes():
-            if v.get("name") == self.cfg.volume:
-                return v["id"]
+        vols = {v.get("name"): v["id"] for v in self.api.global_volumes()}
+        if self.cfg.volume in vols:
+            return vols[self.cfg.volume]
+        if self.cfg.volume == "poddo" and LEGACY in vols:  # Volume aus der Zeit vor der Umbenennung
+            return vols[LEGACY]
         if not create:
             return None
         v = self.api.create_global_volume(self.cfg.volume)
@@ -130,7 +137,7 @@ class Pods:
         if self.cfg.volume and not vol:
             say(
                 f"Hinweis: Global Volume {self.cfg.volume!r} fehlt, setup laeuft dann jedes Mal. "
-                "Anlegen mit: pod-do volume --create"
+                "Anlegen mit: poddo volume --create"
             )
         body: dict = {
             "name": pod_name(self.project.name, env.name),
@@ -151,10 +158,10 @@ class Pods:
             if pod:
                 return pod
             if time.time() >= deadline:
-                hint = "" if wait_minutes else " Mit --wait <minuten> wartet pod-do auf eine freie Karte."
+                hint = "" if wait_minutes else " Mit --wait <minuten> wartet poddo auf eine freie Karte."
                 raise ConfigError(
                     f"Keine der GPUs ist gerade frei ({', '.join(wanted)}).{hint} "
-                    "pod-do gpus zeigt, was es gibt; --gpu waehlt andere."
+                    "poddo gpus zeigt, was es gibt; --gpu waehlt andere."
                 )
             left = int((deadline - time.time()) / 60)
             say(f"keine GPU frei, versuche in 30 s nochmals (noch etwa {left} min)")
@@ -193,7 +200,7 @@ class Pods:
                 raise ConfigError(f"Pod {pod['id']} ist {st}. Logs in der RunPod-Konsole.")
             ssh = ssh_of(pod)
             if st == "RUNNING" and ssh:
-                r = Remote(ssh, self.cfg.ssh_key)
+                r = Remote(ssh, self.cfg.ssh_key, prelude=S.LEGACY_LINK)
                 if r.ok():
                     say(f"SSH bereit: {ssh.user}@{ssh.host}:{ssh.port}")
                     return r
@@ -207,7 +214,7 @@ class Pods:
         ssh = ssh_of(pod) or ssh_of(self.api.get_pod(pod["id"]))
         if not ssh:
             raise ConfigError(f"Pod {pod['id']} hat (noch) keine SSH-Verbindung")
-        return Remote(ssh, self.cfg.ssh_key)
+        return Remote(ssh, self.cfg.ssh_key, prelude=S.LEGACY_LINK)
 
     def install(self, r: Remote, env: EnvSpec) -> None:
         """Skripte hinkopieren und den Waechter starten, alles in einem SSH-Aufruf."""
@@ -225,7 +232,7 @@ class Pods:
             f"{S.ROOT}/watchdog.sh": S.WATCHDOG_SH,
             f"{S.ROOT}/status.sh": S.STATUS_SH,
             f"{S.ROOT}/save.sh": S.SAVE_SH,
-            f"{S.ROOT}/bin/pod-do-progress": S.PROGRESS_SH,
+            f"{S.ROOT}/bin/poddo-progress": S.PROGRESS_SH,
             f"{S.ROOT}/setup.sh": env.setup,
             f"{S.ROOT}/boot.sh": env.boot,
         }
@@ -273,7 +280,7 @@ class Pods:
         try:
             code = r.run(f"bash {S.ROOT}/follow.sh {shlex.quote(d)}", check=False).returncode
         except KeyboardInterrupt:
-            say(f"Abgekoppelt. Der Job {job} laeuft auf dem Pod weiter: pod-do attach {job}")
+            say(f"Abgekoppelt. Der Job {job} laeuft auf dem Pod weiter: poddo attach {job}")
             raise
         if code == 255:
             # 255 kommt von ssh selbst (Verbindung weg, Laptop schlief), ausser der Job endete wirklich so
@@ -283,7 +290,7 @@ class Pods:
                 real = ""
             if real != "255":
                 raise RemoteError(
-                    f"Verbindung zum Pod verloren. Der Job {job} laeuft weiter: pod-do attach {job}"
+                    f"Verbindung zum Pod verloren. Der Job {job} laeuft weiter: poddo attach {job}"
                 )
         return code
 
@@ -297,7 +304,7 @@ class Pods:
         push: bool = True,
     ) -> tuple[dict, Remote]:
         if env_name not in self.project.envs:
-            raise ConfigError(f"Umgebung {env_name!r} gibt es nicht in pod-do.toml")
+            raise ConfigError(f"Umgebung {env_name!r} gibt es nicht in poddo.toml")
         env = self.project.envs[env_name]
         target = image_ref(env)
         if target:
@@ -331,12 +338,12 @@ class Pods:
                 try:
                     self.api.terminate_pod(pod["id"])
                 except Exception as e:
-                    say(f"Loeschen ging nicht ({e}). Bitte von Hand: pod-do down")
+                    say(f"Loeschen ging nicht ({e}). Bitte von Hand: poddo down")
             raise
         code = self.run_job(r, "_bootstrap", f"bash {S.ROOT}/bootstrap.sh")
         if code != 0:
             raise ConfigError(
-                f"Einrichten fehlgeschlagen (Code {code}). Log: pod-do ssh, dann "
+                f"Einrichten fehlgeschlagen (Code {code}). Log: poddo ssh, dann "
                 f"cat {S.ROOT}/jobs/_bootstrap/log"
             )
         if target and push and not self.has_image_marker(r, env, target):
@@ -349,12 +356,12 @@ class Pods:
         ref = registry.ImageRef.parse(target)
         if not self.cfg.registry_user:
             raise ConfigError(
-                "registry_user fehlt in ~/.config/pod-do/config.toml (z. B. GitHub-Name bei ghcr.io)"
+                "registry_user fehlt in ~/.config/poddo/config.toml (z. B. GitHub-Name bei ghcr.io)"
             )
         return registry.image_exists(ref, self.cfg.registry_user, registry.token(ref.host))
 
     def runpod_registry_id(self) -> str | None:
-        """Zugangsdaten bei RunPod, mit denen der Pod das private Image zieht (pod-do registry runpod)."""
+        """Zugangsdaten bei RunPod, mit denen der Pod das private Image zieht (poddo registry runpod)."""
         try:
             regs = self.api.registries()
         except ApiError as e:
@@ -370,12 +377,12 @@ class Pods:
                 return r["id"]
         say(
             f"Hinweis: keine Registry-Zugangsdaten {self.cfg.runpod_registry!r} bei RunPod. Ein privates "
-            "Image laesst sich dann nicht ziehen. Anlegen mit: pod-do registry runpod"
+            "Image laesst sich dann nicht ziehen. Anlegen mit: poddo registry runpod"
         )
         return None
 
     def has_image_marker(self, r: Remote, env: EnvSpec, target: str) -> bool:
-        marker = f"{S.ROOT}/envs/{env.name}/.pod-do-image"
+        marker = f"{S.ROOT}/envs/{env.name}/.poddo-image"
         out = r.run(f"cat {marker} 2>/dev/null || true", capture=True).stdout.strip()
         return out == target
 

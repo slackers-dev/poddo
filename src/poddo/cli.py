@@ -1,4 +1,4 @@
-"""pod-do: schwere Aufgaben vom Laptop auf eine RunPod-GPU abgeben."""
+"""poddo: schwere Aufgaben vom Laptop auf eine RunPod-GPU abgeben."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from .config import (
     config_dir,
     store_api_key_interactive,
 )
-from .pod import Pods, gpu_candidates, image_ref, say
+from .pod import Pods, gpu_candidates, image_ref, is_ours, say
 from .remote import RemoteError
 from .task import Runner
 
@@ -55,7 +55,7 @@ def cmd_init(a) -> int:
         print(f"{p} gibt es schon")
         return 1
     p.write_text(TEMPLATE)
-    print(f"{p} angelegt. Umgebung und Aufgabe anpassen, dann: pod-do run hello <datei>")
+    print(f"{p} angelegt. Umgebung und Aufgabe anpassen, dann: poddo run hello <datei>")
     return 0
 
 
@@ -120,8 +120,8 @@ def cmd_ssh(a) -> int:
     env = _env_arg(project, a.env)
     pod = pods.find(env)
     if not pod:
-        raise ConfigError(f"Kein Pod fuer {env}. Starten mit: pod-do up {env}")
-    return pods.remote(pod).interactive(cd="/opt/pod-do")
+        raise ConfigError(f"Kein Pod fuer {env}. Starten mit: poddo up {env}")
+    return pods.remote(pod).interactive(cd="/opt/poddo")
 
 
 def cmd_status(a) -> int:
@@ -129,16 +129,16 @@ def cmd_status(a) -> int:
     bal = api.balance()
     print(f"Guthaben: ${bal['balanceAmount']:.2f}")
     all_pods = api.list_pods()
-    mine = [p for p in all_pods if p.get("name", "").startswith("pod-do-")]
+    mine = [p for p in all_pods if is_ours(p.get("name", ""))]
     others = len(all_pods) - len(mine)
     if not mine:
-        print("Keine pod-do-Pods.")
+        print("Keine poddo-Pods.")
     for p in mine:
         gpu = (p.get("gpu") or {}).get("id", "-")
         status, name, cost = p.get("status", "?"), p.get("name", ""), p.get("cost", 0)
         print(f"{p['id']:16} {status:12} {name:36} {gpu:32} ${cost:.2f}/h")
     if others:
-        print(f"({others} weitere Pods, nicht von pod-do)")
+        print(f"({others} weitere Pods, nicht von poddo)")
     try:
         here = Project.find()
     except ConfigError:
@@ -146,12 +146,12 @@ def cmd_status(a) -> int:
     if here:
         open_jobs = Runner(Pods(api, cfg, here), here).unfetched()
         for st in open_jobs:
-            print(f"Ergebnisse NICHT abgeholt: {st['job']}  ->  pod-do attach {st['job']}")
+            print(f"Ergebnisse NICHT abgeholt: {st['job']}  ->  poddo attach {st['job']}")
         if open_jobs:
-            print("(Details mit Fortschritt: pod-do jobs)")
+            print("(Details mit Fortschritt: poddo jobs)")
     vol = Pods(api, cfg, project or Project(Path.cwd(), "-", {}, {})).volume_id() if cfg.volume else None
     print(
-        f"Global Volume {cfg.volume!r}: {vol or 'fehlt (pod-do volume --create)'}"
+        f"Global Volume {cfg.volume!r}: {vol or 'fehlt (poddo volume --create)'}"
         if cfg.volume
         else "Ohne Volume"
     )
@@ -162,9 +162,7 @@ def cmd_down(a) -> int:
     cfg, api, project = _ctx(need_project=not a.all)
     if a.all:
         targets = [
-            p
-            for p in api.list_pods()
-            if p.get("name", "").startswith("pod-do-") and p.get("status") != "TERMINATED"
+            p for p in api.list_pods() if is_ours(p.get("name", "")) and p.get("status") != "TERMINATED"
         ]
     else:
         pods = Pods(api, cfg, project)
@@ -188,7 +186,7 @@ def cmd_volume(a) -> int:
     if vid:
         print(f"Global Volume {cfg.volume!r}: {vid} (auf dem Pod unter /vol)")
     else:
-        print(f"Global Volume {cfg.volume!r} fehlt. Anlegen: pod-do volume --create (erste 100 GB gratis)")
+        print(f"Global Volume {cfg.volume!r} fehlt. Anlegen: poddo volume --create (erste 100 GB gratis)")
     return 0
 
 
@@ -209,7 +207,7 @@ def cmd_check(a) -> int:
 
 
 def _set_config(key: str, value: str) -> None:
-    """Eine Zeile `key = "value"` in ~/.config/pod-do/config.toml setzen."""
+    """Eine Zeile `key = "value"` in ~/.config/poddo/config.toml setzen."""
     f = config_dir() / "config.toml"
     f.parent.mkdir(parents=True, exist_ok=True)
     lines = f.read_text().splitlines() if f.exists() else []
@@ -245,7 +243,7 @@ def cmd_image(a) -> int:
     env = _env_arg(project, a.env)
     target = image_ref(project.envs[env])
     if not target:
-        raise ConfigError(f'env.{env} hat kein docker = "<registry>/<repo>" in pod-do.toml')
+        raise ConfigError(f'env.{env} hat kein docker = "<registry>/<repo>" in poddo.toml')
     pods = Pods(api, cfg, project)
     if not a.check:
         pods.ensure(env, a.gpu, a.wait)
@@ -254,8 +252,8 @@ def cmd_image(a) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="pod-do", description=__doc__)
-    p.add_argument("--version", action="version", version=f"pod-do {__version__}")
+    p = argparse.ArgumentParser(prog="poddo", description=__doc__)
+    p.add_argument("--version", action="version", version=f"poddo {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("login", help="RunPod-API-Schluessel sicher ablegen").set_defaults(fn=cmd_login)
@@ -288,7 +286,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument(
         "--detach",
         action="store_true",
-        help="nur starten, nicht warten (Ergebnisse spaeter mit pod-do attach holen)",
+        help="nur starten, nicht warten (Ergebnisse spaeter mit poddo attach holen)",
     )
     g = s.add_mutually_exclusive_group()
     g.add_argument("--down", action="store_true", help="Pod danach sofort loeschen")
@@ -318,7 +316,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("down", help="Pods dieses Projekts loeschen")
     s.add_argument("env", nargs="?")
-    s.add_argument("--all", action="store_true", help="alle pod-do-Pods, egal welches Projekt")
+    s.add_argument("--all", action="store_true", help="alle poddo-Pods, egal welches Projekt")
     s.set_defaults(fn=cmd_down)
 
     s = sub.add_parser("registry", help="Zugang zur Registry fuer Docker-Images")
@@ -347,7 +345,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.fn(args) or 0
     except (ConfigError, ApiError, RemoteError) as e:
-        print(f"pod-do: {e}", file=sys.stderr)
+        print(f"poddo: {e}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         return 130

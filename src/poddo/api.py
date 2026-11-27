@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 BASE_URL = "https://api.runpod.io"
-USER_AGENT = "pod-do/0.1"
+USER_AGENT = "poddo/0.1"
 
 
 class ApiError(Exception):
