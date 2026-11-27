@@ -1,4 +1,10 @@
-# pod-do
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+    <img src="assets/logo.svg" alt="" height="28">
+  </picture>
+  pod-do
+</h1>
 
 Schwere Aufgaben vom Laptop auf eine GPU bei [RunPod](https://www.runpod.io) abgeben. Ein Befehl startet
 einen Pod, lädt die Eingaben hoch, rechnet, holt das Ergebnis zurück. Ein Wächter auf dem Pod löscht ihn,
